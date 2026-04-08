@@ -46,7 +46,12 @@ init(Config) ->
     GameConfig = maps:get(game_config, Config, #{}),
     case asobi_lua_loader:new(ScriptPath) of
         {ok, LuaSt0} ->
-            {EncConfig, LuaSt1} = luerl:encode(GameConfig, LuaSt0),
+            Ctx = #{
+                match_id => maps:get(match_id, Config, undefined),
+                match_pid => self()
+            },
+            LuaSt0a = asobi_lua_api:install(Ctx, LuaSt0),
+            {EncConfig, LuaSt1} = luerl:encode(GameConfig, LuaSt0a),
             case asobi_lua_loader:call(init, [EncConfig], LuaSt1) of
                 {ok, [GameState | _], LuaSt2} ->
                     {ok, #{lua_state => LuaSt2, game_state => GameState, script => ScriptPath}};
