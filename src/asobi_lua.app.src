@@ -1,0 +1,17 @@
+{application, asobi_lua, [
+    {description, "Lua scripting runtime for Asobi game backend"},
+    {vsn, git},
+    {registered, [asobi_bot_spawner]},
+    {mod, {asobi_lua_app, []}},
+    {included_applications, []},
+    {applications, [
+        kernel,
+        stdlib,
+        asobi,
+        luerl
+    ]},
+    {env, []},
+    {modules, []},
+    {licenses, ["Apache-2.0"]},
+    {links, [{"GitHub", "https://github.com/widgrensit/asobi_lua"}]}
+]}.

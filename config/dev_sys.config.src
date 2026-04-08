@@ -1,0 +1,32 @@
+[
+    {asobi, [
+        {port, 8080},
+        {game_dir, "/app/game"}
+    ]},
+    {asobi_lua, []},
+    {nova, [
+        {cowboy_configuration, #{
+            port => ${ASOBI_PORT}
+        }},
+        {use_stacktrace, true}
+    ]},
+    {kura, [
+        {repos, [
+            {asobi_repo, #{
+                pool_size => 5,
+                host => "${ASOBI_DB_HOST}",
+                database => "${ASOBI_DB_NAME}",
+                user => "${ASOBI_DB_USER}",
+                password => "${ASOBI_DB_PASSWORD}"
+            }}
+        ]}
+    ]},
+    {kernel, [
+        {logger_level, info},
+        {logger, [
+            {handler, default, logger_std_h, #{
+                formatter => {nova_jsonlogger, #{}}
+            }}
+        ]}
+    ]}
+].

@@ -1,0 +1,7 @@
+_build/
+_checkouts/
+.rebar3/
+rebar3.crashdump
+erl_crash.dump
+CLAUDE.md
+.tool-versions

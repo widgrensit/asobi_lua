@@ -1,0 +1,3 @@
+-sname asobi_lua
+-setcookie ${ERLANG_COOKIE}
++pc unicode
