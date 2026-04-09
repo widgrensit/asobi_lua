@@ -17,6 +17,9 @@ function post_tick(tick, state)              -- return state (or state + vote/fi
 function generate_world(seed, config)        -- return zone_states table
 function get_state(player_id, state)         -- return state visible to player
 function vote_resolved(template, result, state) -- return updated state
+function phases(config)                      -- return list of phase definitions
+function on_phase_started(phase_name, state) -- return updated state
+function on_phase_ended(phase_name, state)   -- return updated state
 ```
 """.
 
@@ -25,6 +28,7 @@ function vote_resolved(template, result, state) -- return updated state
 -export([init/1, join/2, leave/2, spawn_position/2]).
 -export([zone_tick/2, handle_input/3, post_tick/2]).
 -export([generate_world/2, get_state/2]).
+-export([phases/1, on_phase_started/2, on_phase_ended/2]).
 
 -define(TICK_TIMEOUT, 500).
 
@@ -81,13 +85,34 @@ spawn_position(PlayerId, #{lua_state := LuaSt, game_state := GS}) ->
     end.
 
 -spec zone_tick(map(), term()) -> {map(), term()}.
+zone_tick(Entities, ZoneState) when is_map(ZoneState), is_map_key(lua_state, ZoneState) ->
+    LuaSt = maps:get(lua_state, ZoneState),
+    {EncEntities, LuaSt1} = luerl:encode(Entities, LuaSt),
+    GS = maps:get(game_state, ZoneState, nil),
+    case asobi_lua_loader:call(zone_tick, [EncEntities, GS], LuaSt1, ?TICK_TIMEOUT) of
+        {ok, [Ents1, ZS1 | _], LuaSt2} ->
+            DecodedEnts = decode_to_map(Ents1, LuaSt2),
+            {DecodedEnts, ZoneState#{lua_state => LuaSt2, game_state => ZS1}};
+        {ok, [Ents1 | _], LuaSt2} ->
+            DecodedEnts = decode_to_map(Ents1, LuaSt2),
+            {DecodedEnts, ZoneState#{lua_state => LuaSt2}};
+        {error, _} ->
+            {Entities, ZoneState}
+    end;
 zone_tick(Entities, ZoneState) ->
-    %% Zone tick runs per-zone, not with the global lua state.
-    %% Entities and ZoneState are plain Erlang maps at this level.
-    %% The game module wrapping must handle Lua encoding per-zone.
     {Entities, ZoneState}.
 
 -spec handle_input(binary(), map(), map()) -> {ok, map()} | {error, term()}.
+handle_input(PlayerId, Input, Entities) when is_map(Entities), is_map_key(lua_state, Entities) ->
+    LuaSt = maps:get(lua_state, Entities),
+    {EncInput, LuaSt1} = luerl:encode(Input, LuaSt),
+    {EncEntities, LuaSt2} = luerl:encode(maps:without([lua_state], Entities), LuaSt1),
+    case asobi_lua_loader:call(handle_input, [PlayerId, EncInput, EncEntities], LuaSt2) of
+        {ok, [Ents1 | _], LuaSt3} ->
+            {ok, decode_to_map(Ents1, LuaSt3)};
+        {error, _} ->
+            {ok, Entities}
+    end;
 handle_input(_PlayerId, _Input, Entities) ->
     {ok, Entities}.
 
@@ -129,6 +154,37 @@ get_state(PlayerId, #{lua_state := LuaSt, game_state := GS}) ->
             decode_to_map(PlayerState, LuaSt1);
         {error, _} ->
             #{}
+    end.
+
+%% --- Phase callbacks ---
+
+-spec phases(map()) -> [map()].
+phases(#{lua_state := LuaSt} = _Config) ->
+    case asobi_lua_loader:call(phases, [#{}], LuaSt) of
+        {ok, [PhasesRef | _], LuaSt1} ->
+            decode_phases(PhasesRef, LuaSt1);
+        {error, _} ->
+            []
+    end;
+phases(_) ->
+    [].
+
+-spec on_phase_started(binary(), map()) -> {ok, map()}.
+on_phase_started(PhaseName, #{lua_state := LuaSt, game_state := GS} = State) ->
+    case asobi_lua_loader:call(on_phase_started, [PhaseName, GS], LuaSt) of
+        {ok, [GS1 | _], LuaSt1} ->
+            {ok, State#{lua_state => LuaSt1, game_state => GS1}};
+        {error, _} ->
+            {ok, State}
+    end.
+
+-spec on_phase_ended(binary(), map()) -> {ok, map()}.
+on_phase_ended(PhaseName, #{lua_state := LuaSt, game_state := GS} = State) ->
+    case asobi_lua_loader:call(on_phase_ended, [PhaseName, GS], LuaSt) of
+        {ok, [GS1 | _], LuaSt1} ->
+            {ok, State#{lua_state => LuaSt1, game_state => GS1}};
+        {error, _} ->
+            {ok, State}
     end.
 
 %% --- Internal ---
@@ -175,6 +231,58 @@ decode_zone_states(ZoneStatesRef, LuaSt) ->
         Decoded
     ).
 
+decode_phases(PhasesRef, LuaSt) ->
+    Decoded = luerl:decode(PhasesRef, LuaSt),
+    lists:filtermap(
+        fun
+            ({_, PhaseProps}) when is_list(PhaseProps) ->
+                Name = proplists:get_value(~"name", PhaseProps),
+                case Name of
+                    undefined ->
+                        false;
+                    _ ->
+                        Phase0 = #{name => Name},
+                        Phase1 = maybe_add(
+                            Phase0, duration, PhaseProps, ~"duration", fun to_integer/1
+                        ),
+                        Phase2 = maybe_add(
+                            Phase1, start, PhaseProps, ~"start", fun decode_phase_start/1
+                        ),
+                        Phase3 = maybe_add(
+                            Phase2, config, PhaseProps, ~"config", fun deep_decode/1
+                        ),
+                        {true, Phase3}
+                end;
+            (_) ->
+                false
+        end,
+        Decoded
+    ).
+
+decode_phase_start(~"prev_ended") ->
+    prev_ended;
+decode_phase_start(~"all_ready") ->
+    all_ready;
+decode_phase_start(V) when is_number(V) -> {timer, trunc(V)};
+decode_phase_start(Props) when is_list(Props) ->
+    case proplists:get_value(~"players", Props) of
+        N when is_number(N) -> {players, trunc(N)};
+        _ ->
+            case proplists:get_value(~"timer", Props) of
+                N when is_number(N) -> {timer, trunc(N)};
+                _ -> prev_ended
+            end
+    end;
+decode_phase_start(_) ->
+    prev_ended.
+
+maybe_add(Map, Key, Props, LuaKey, DecodeFn) ->
+    case proplists:get_value(LuaKey, Props) of
+        undefined -> Map;
+        nil -> Map;
+        Val -> Map#{Key => DecodeFn(Val)}
+    end.
+
 parse_coords(Bin) ->
     case binary:split(Bin, ~",") of
         [XBin, YBin] ->
@@ -210,3 +318,6 @@ deep_decode_pairs([]) ->
 
 to_number(N) when is_number(N) -> N;
 to_number(_) -> 0.0.
+
+to_integer(N) when is_number(N) -> trunc(N);
+to_integer(_) -> 0.
