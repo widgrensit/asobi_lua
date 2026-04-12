@@ -20,6 +20,8 @@ function vote_resolved(template, result, state) -- return updated state
 function phases(config)                      -- return list of phase definitions
 function on_phase_started(phase_name, state) -- return updated state
 function on_phase_ended(phase_name, state)   -- return updated state
+function spawn_templates(config)             -- return template registry table
+function on_world_recovered(snapshots, state) -- return updated state
 ```
 """.
 
@@ -29,6 +31,7 @@ function on_phase_ended(phase_name, state)   -- return updated state
 -export([zone_tick/2, handle_input/3, post_tick/2]).
 -export([generate_world/2, get_state/2]).
 -export([phases/1, on_phase_started/2, on_phase_ended/2]).
+-export([spawn_templates/1, on_world_recovered/2]).
 
 -define(TICK_TIMEOUT, 500).
 
@@ -187,6 +190,31 @@ on_phase_ended(PhaseName, #{lua_state := LuaSt, game_state := GS} = State) ->
             {ok, State}
     end.
 
+%% --- Spawn templates ---
+
+-spec spawn_templates(map()) -> #{binary() => asobi_zone_spawner:spawn_template()}.
+spawn_templates(#{lua_state := LuaSt} = _Config) ->
+    case asobi_lua_loader:call(spawn_templates, [#{}], LuaSt) of
+        {ok, [TemplatesRef | _], LuaSt1} ->
+            decode_spawn_templates(TemplatesRef, LuaSt1);
+        {error, _} ->
+            #{}
+    end;
+spawn_templates(_) ->
+    #{}.
+
+%% --- World recovery ---
+
+-spec on_world_recovered(map(), map()) -> {ok, map()}.
+on_world_recovered(Snapshots, #{lua_state := LuaSt, game_state := GS} = State) ->
+    {EncSnap, LuaSt1} = luerl:encode(Snapshots, LuaSt),
+    case asobi_lua_loader:call(on_world_recovered, [EncSnap, GS], LuaSt1) of
+        {ok, [GS1 | _], LuaSt2} ->
+            {ok, State#{lua_state => LuaSt2, game_state => GS1}};
+        {error, _} ->
+            {ok, State}
+    end.
+
 %% --- Internal ---
 
 decode_position(PosTable, LuaSt) ->
@@ -321,3 +349,52 @@ to_number(_) -> 0.0.
 
 to_integer(N) when is_number(N) -> trunc(N);
 to_integer(_) -> 0.
+
+decode_spawn_templates(TemplatesRef, LuaSt) ->
+    Decoded = luerl:decode(TemplatesRef, LuaSt),
+    lists:foldl(
+        fun
+            ({TemplateId, Props}, Acc) when is_binary(TemplateId), is_list(Props) ->
+                Type = proplists:get_value(~"type", Props, ~"npc"),
+                BaseState = deep_decode(proplists:get_value(~"base_state", Props, [])),
+                Base =
+                    case is_map(BaseState) of
+                        true -> BaseState;
+                        false -> #{}
+                    end,
+                Template = #{
+                    template_id => TemplateId,
+                    type => Type,
+                    base_state => Base,
+                    persistent => proplists:get_value(~"persistent", Props, true),
+                    respawn => decode_respawn_rule(
+                        proplists:get_value(~"respawn", Props, nil)
+                    )
+                },
+                Acc#{TemplateId => Template};
+            (_, Acc) ->
+                Acc
+        end,
+        #{},
+        Decoded
+    ).
+
+decode_respawn_rule(nil) ->
+    undefined;
+decode_respawn_rule(false) ->
+    undefined;
+decode_respawn_rule(Props) when is_list(Props) ->
+    #{
+        strategy => timer,
+        delay => to_integer(proplists:get_value(~"delay", Props, 0)),
+        max_respawns => decode_max_respawns(
+            proplists:get_value(~"max_respawns", Props, nil)
+        ),
+        jitter => to_integer(proplists:get_value(~"jitter", Props, 0))
+    };
+decode_respawn_rule(_) ->
+    undefined.
+
+decode_max_respawns(nil) -> infinity;
+decode_max_respawns(N) when is_number(N) -> trunc(N);
+decode_max_respawns(_) -> infinity.

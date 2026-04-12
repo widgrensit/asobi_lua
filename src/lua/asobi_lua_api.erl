@@ -2,7 +2,7 @@
 -moduledoc """
 Installs the `game.*` Lua API into a Luerl state, giving Lua scripts
 access to engine features like economy, leaderboards, notifications,
-storage, and messaging.
+storage, messaging, spatial queries, and zone spawning.
 
 Called from `asobi_lua_match:init/1` and `asobi_lua_world:init/1`
 before the Lua script's `init()` runs.
@@ -41,6 +41,19 @@ game.storage.player_set(player_id, collection, key, value)
 
 -- Chat
 game.chat.send(channel_id, sender_id, content)
+
+-- Spatial queries (operate on entity tables)
+game.spatial.query_radius(entities, x, y, radius)
+game.spatial.query_radius(entities, x, y, radius, opts)
+game.spatial.nearest(entities, x, y, n)
+game.spatial.nearest(entities, x, y, n, opts)
+game.spatial.in_range(entity_a, entity_b, range)
+game.spatial.distance(entity_a, entity_b)
+
+-- Zone spawning (world mode only, requires zone_pid in context)
+game.zone.spawn(template_id, x, y)
+game.zone.spawn(template_id, x, y, overrides)
+game.zone.despawn(entity_id)
 ```
 """.
 
@@ -53,7 +66,9 @@ install(Ctx, St0) ->
     St2 = create_table([~"game", ~"economy"], St1),
     St3 = create_table([~"game", ~"leaderboard"], St2),
     St4 = create_table([~"game", ~"storage"], St3),
-    St5 = create_table([~"game", ~"chat"], St4),
+    St5a = create_table([~"game", ~"chat"], St4),
+    St5b = create_table([~"game", ~"spatial"], St5a),
+    St5 = create_table([~"game", ~"zone"], St5b),
     Fns = [
         %% Core
         {[~"game", ~"id"], fun_id()},
@@ -78,7 +93,15 @@ install(Ctx, St0) ->
         {[~"game", ~"storage", ~"player_get"], fun_storage_player_get()},
         {[~"game", ~"storage", ~"player_set"], fun_storage_player_set()},
         %% Chat
-        {[~"game", ~"chat", ~"send"], fun_chat_send()}
+        {[~"game", ~"chat", ~"send"], fun_chat_send()},
+        %% Spatial
+        {[~"game", ~"spatial", ~"query_radius"], fun_spatial_query_radius()},
+        {[~"game", ~"spatial", ~"nearest"], fun_spatial_nearest()},
+        {[~"game", ~"spatial", ~"in_range"], fun_spatial_in_range()},
+        {[~"game", ~"spatial", ~"distance"], fun_spatial_distance()},
+        %% Zone spawning
+        {[~"game", ~"zone", ~"spawn"], fun_zone_spawn(Ctx)},
+        {[~"game", ~"zone", ~"despawn"], fun_zone_despawn(Ctx)}
     ],
     lists:foldl(
         fun({Path, Fn}, St) ->
@@ -362,6 +385,136 @@ fun_chat_send() ->
         end
     end.
 
+%% --- Spatial ---
+
+fun_spatial_query_radius() ->
+    fun(Args, St) ->
+        case decode_args(Args, St) of
+            [Entities, X, Y, Radius] when
+                is_map(Entities), is_number(X), is_number(Y), is_number(Radius)
+            ->
+                Results = asobi_spatial:query_radius(atomize_entities(Entities), {X, Y}, Radius),
+                encode_spatial_results(Results, St);
+            [Entities, X, Y, Radius, OptsRaw] when
+                is_map(Entities), is_number(X), is_number(Y), is_number(Radius)
+            ->
+                Opts = decode_spatial_opts(OptsRaw),
+                Results = asobi_spatial:query_radius(
+                    atomize_entities(Entities), {X, Y}, Radius, Opts
+                ),
+                encode_spatial_results(Results, St);
+            _ ->
+                error_result(~"query_radius requires (entities, x, y, radius[, opts])", St)
+        end
+    end.
+
+fun_spatial_nearest() ->
+    fun(Args, St) ->
+        case decode_args(Args, St) of
+            [Entities, X, Y, N] when is_map(Entities), is_number(X), is_number(Y), is_number(N) ->
+                Results = asobi_spatial:nearest(atomize_entities(Entities), {X, Y}, trunc(N)),
+                encode_spatial_results(Results, St);
+            [Entities, X, Y, N, OptsRaw] when
+                is_map(Entities), is_number(X), is_number(Y), is_number(N)
+            ->
+                Opts = decode_spatial_opts(OptsRaw),
+                Results = asobi_spatial:nearest(atomize_entities(Entities), {X, Y}, trunc(N), Opts),
+                encode_spatial_results(Results, St);
+            _ ->
+                error_result(~"nearest requires (entities, x, y, n[, opts])", St)
+        end
+    end.
+
+fun_spatial_in_range() ->
+    fun(Args, St) ->
+        case decode_args(Args, St) of
+            [A, B, Range] when is_map(A), is_map(B), is_number(Range) ->
+                Result = asobi_spatial:in_range(atomize_keys(A), atomize_keys(B), Range),
+                {[Result], St};
+            _ ->
+                error_result(~"in_range requires (entity_a, entity_b, range)", St)
+        end
+    end.
+
+fun_spatial_distance() ->
+    fun(Args, St) ->
+        case decode_args(Args, St) of
+            [A, B] when is_map(A), is_map(B) ->
+                D = asobi_spatial:distance(atomize_keys(A), atomize_keys(B)),
+                {[D], St};
+            _ ->
+                error_result(~"distance requires (entity_a, entity_b)", St)
+        end
+    end.
+
+encode_spatial_results(Results, St) ->
+    Encoded = [
+        #{~"id" => Id, ~"entity" => Entity, ~"distance" => Dist}
+     || {Id, Entity, Dist} <- Results
+    ],
+    {Enc, St1} = luerl:encode(Encoded, St),
+    {[Enc], St1}.
+
+decode_spatial_opts(OptsRaw) when is_map(OptsRaw) ->
+    Opts0 = #{},
+    Opts1 =
+        case maps:find(~"type", OptsRaw) of
+            {ok, T} when is_binary(T) -> Opts0#{type => T};
+            {ok, T} when is_list(T) -> Opts0#{type => [B || B <- T, is_binary(B)]};
+            _ -> Opts0
+        end,
+    Opts2 =
+        case maps:find(~"exclude", OptsRaw) of
+            {ok, E} when is_binary(E) -> Opts1#{exclude => E};
+            {ok, E} when is_list(E) -> Opts1#{exclude => [B || B <- E, is_binary(B)]};
+            _ -> Opts1
+        end,
+    Opts3 =
+        case maps:find(~"max_results", OptsRaw) of
+            {ok, N} when is_number(N) -> Opts2#{max_results => trunc(N)};
+            _ -> Opts2
+        end,
+    case maps:find(~"sort", OptsRaw) of
+        {ok, ~"nearest"} -> Opts3#{sort => nearest};
+        {ok, ~"farthest"} -> Opts3#{sort => farthest};
+        _ -> Opts3
+    end;
+decode_spatial_opts(_) ->
+    #{}.
+
+%% --- Zone spawning ---
+
+fun_zone_spawn(#{zone_pid := ZonePid}) ->
+    fun(Args, St) ->
+        case decode_args(Args, St) of
+            [TemplateId, X, Y] when is_binary(TemplateId), is_number(X), is_number(Y) ->
+                asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}),
+                {[true], St};
+            [TemplateId, X, Y, Overrides] when
+                is_binary(TemplateId), is_number(X), is_number(Y), is_map(Overrides)
+            ->
+                asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}, Overrides),
+                {[true], St};
+            _ ->
+                error_result(~"zone.spawn requires (template_id, x, y[, overrides])", St)
+        end
+    end;
+fun_zone_spawn(_) ->
+    fun(_, St) -> error_result(~"zone.spawn not available (no zone context)", St) end.
+
+fun_zone_despawn(#{zone_pid := ZonePid}) ->
+    fun(Args, St) ->
+        case decode_args(Args, St) of
+            [EntityId] when is_binary(EntityId) ->
+                asobi_zone:despawn_entity(ZonePid, EntityId),
+                {[true], St};
+            _ ->
+                error_result(~"zone.despawn requires (entity_id)", St)
+        end
+    end;
+fun_zone_despawn(_) ->
+    fun(_, St) -> error_result(~"zone.despawn not available (no zone context)", St) end.
+
 %% --- Storage helpers ---
 
 -spec storage_get(binary(), binary(), binary() | undefined) -> {ok, map()} | {error, term()}.
@@ -492,6 +645,38 @@ ensure_pairs(L) ->
 to_bin(B) when is_binary(B) -> B;
 to_bin(A) when is_atom(A) -> atom_to_binary(A);
 to_bin(T) -> list_to_binary(io_lib:format("~p", [T])).
+
+%% --- Entity key conversion ---
+%% Lua tables use binary keys ("x"), asobi_spatial expects atom keys (x).
+
+atomize_entities(Entities) ->
+    maps:map(
+        fun
+            (_Id, E) when is_map(E) -> atomize_keys(E);
+            (_, V) -> V
+        end,
+        Entities
+    ).
+
+atomize_keys(M) when is_map(M) ->
+    maps:fold(
+        fun(K, V, Acc) ->
+            Key = safe_to_atom(K),
+            Acc#{Key => V}
+        end,
+        #{},
+        M
+    ).
+
+safe_to_atom(B) when is_binary(B) ->
+    try
+        binary_to_existing_atom(B)
+    catch
+        _:_ -> B
+    end;
+safe_to_atom(A) when is_atom(A) -> A;
+safe_to_atom(V) ->
+    V.
 
 -spec create_table([binary()], dynamic()) -> dynamic().
 create_table(Path, St) ->

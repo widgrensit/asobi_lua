@@ -26,7 +26,13 @@ api_test_() ->
         {"game.notify sends notification", fun game_notify/0},
         {"game.chat.send sends message", fun game_chat_send/0},
         {"api installed in match init", fun api_in_match_init/0},
-        {"game api callable from lua script", fun game_api_from_script/0}
+        {"game api callable from lua script", fun game_api_from_script/0},
+        {"game.spatial.query_radius returns results", fun spatial_query_radius/0},
+        {"game.spatial.nearest returns closest", fun spatial_nearest/0},
+        {"game.spatial.in_range checks distance", fun spatial_in_range/0},
+        {"game.spatial.distance returns distance", fun spatial_distance/0},
+        {"game.zone.spawn calls zone", fun zone_spawn/0},
+        {"game.zone.despawn calls zone", fun zone_despawn/0}
     ]}.
 
 setup() ->
@@ -68,6 +74,10 @@ setup() ->
     meck:expect(asobi_repo, update_all, fun(_, _) -> {ok, 1} end),
     meck:new(asobi_chat_channel, [no_link]),
     meck:expect(asobi_chat_channel, send_message, fun(_, _, _) -> ok end),
+    meck:new(asobi_zone, [no_link]),
+    meck:expect(asobi_zone, spawn_entity, fun(_, _, _) -> ok end),
+    meck:expect(asobi_zone, spawn_entity, fun(_, _, _, _) -> ok end),
+    meck:expect(asobi_zone, despawn_entity, fun(_, _) -> ok end),
     ok.
 
 cleanup(_) ->
@@ -79,7 +89,8 @@ cleanup(_) ->
         asobi_leaderboard_server,
         asobi_notify,
         asobi_repo,
-        asobi_chat_channel
+        asobi_chat_channel,
+        asobi_zone
     ]).
 
 %% --- Test cases ---
@@ -145,11 +156,72 @@ game_api_from_script() ->
     ?assertEqual(~"test-uuid-v7", Id),
     ?assert(meck:called(asobi_leaderboard_server, submit, [~"test", ~"p1", 99])).
 
+spatial_query_radius() ->
+    St = install_api(),
+    Code =
+        "local entities = {\n"
+        "  a = { x = 0.0, y = 0.0, type = 'npc' },\n"
+        "  b = { x = 3.0, y = 4.0, type = 'npc' },\n"
+        "  c = { x = 100.0, y = 100.0, type = 'npc' }\n"
+        "}\n"
+        "local results = game.spatial.query_radius(entities, 0.0, 0.0, 6.0)\n"
+        "local count = 0\n"
+        "for _ in pairs(results) do count = count + 1 end\n"
+        "return count",
+    {ok, [Count | _], _} = eval(Code, St),
+    ?assertEqual(2, trunc(Count)).
+
+spatial_nearest() ->
+    St = install_api(),
+    Code =
+        "local entities = {\n"
+        "  a = { x = 10.0, y = 10.0, type = 'npc' },\n"
+        "  b = { x = 1.0, y = 1.0, type = 'npc' }\n"
+        "}\n"
+        "local results = game.spatial.nearest(entities, 0.0, 0.0, 1)\n"
+        "return results[1].id",
+    {ok, [Id | _], _} = eval(Code, St),
+    ?assertEqual(~"b", Id).
+
+spatial_in_range() ->
+    St = install_api(),
+    Code =
+        "local a = { x = 0.0, y = 0.0 }\n"
+        "local b = { x = 3.0, y = 4.0 }\n"
+        "return game.spatial.in_range(a, b, 5.0)",
+    {ok, [true | _], _} = eval(Code, St).
+
+spatial_distance() ->
+    St = install_api(),
+    Code =
+        "local a = { x = 0.0, y = 0.0 }\n"
+        "local b = { x = 3.0, y = 4.0 }\n"
+        "return game.spatial.distance(a, b)",
+    {ok, [D | _], _} = eval(Code, St),
+    ?assert(abs(D - 5.0) < 0.001).
+
+zone_spawn() ->
+    St = install_api_with_zone(),
+    Code = "return game.zone.spawn('goblin', 10.0, 20.0)",
+    {ok, [true | _], _} = eval(Code, St),
+    ?assert(meck:called(asobi_zone, spawn_entity, '_')).
+
+zone_despawn() ->
+    St = install_api_with_zone(),
+    Code = "return game.zone.despawn('entity-123')",
+    {ok, [true | _], _} = eval(Code, St),
+    ?assert(meck:called(asobi_zone, despawn_entity, '_')).
+
 %% --- Helpers ---
 
 install_api() ->
     {ok, St0} = asobi_lua_loader:new(fixture("test_match.lua")),
     Ctx = #{match_id => ~"test-match", match_pid => self()},
+    asobi_lua_api:install(Ctx, St0).
+
+install_api_with_zone() ->
+    {ok, St0} = asobi_lua_loader:new(fixture("test_match.lua")),
+    Ctx = #{match_id => ~"test-match", match_pid => self(), zone_pid => self()},
     asobi_lua_api:install(Ctx, St0).
 
 -spec eval(string(), dynamic()) -> {ok, [term()], dynamic()} | {error, term()}.
