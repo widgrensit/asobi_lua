@@ -30,6 +30,13 @@ match_size   = 4                          -- required, positive integer
 max_players  = 10                         -- optional, defaults to match_size
 strategy     = "fill"                     -- optional, "fill" | "skill_based"
 bots         = { script = "bots/ai.lua" } -- optional
+
+-- World mode config (large session games):
+lazy_zones              = true            -- optional, on-demand zone loading
+zone_idle_timeout       = 30000           -- optional, ms before idle zone is reaped
+max_active_zones        = 10000           -- optional, cap on concurrent zones
+spatial_grid_cell_size  = 64              -- optional, cell size for spatial grid indexing
+cold_tick_divisor       = 10              -- optional, tick rate divisor for cold (unoccupied) zones
 ```
 
 Bot scripts can export a `names` list that the platform reads after loading:
@@ -126,6 +133,11 @@ read_match_globals(ScriptPath, St) ->
     MaxPlayers = read_global_int(~"max_players", St),
     Strategy = read_global_string(~"strategy", St),
     Bots = read_global_table(~"bots", St),
+    LazyZones = read_global_bool(~"lazy_zones", St),
+    ZoneIdleTimeout = read_global_int(~"zone_idle_timeout", St),
+    MaxActiveZones = read_global_int(~"max_active_zones", St),
+    SpatialGridCellSize = read_global_int(~"spatial_grid_cell_size", St),
+    ColdTickDivisor = read_global_int(~"cold_tick_divisor", St),
     case MatchSize of
         undefined ->
             {error, {ScriptPath, ~"match_size global is required"}};
@@ -141,7 +153,10 @@ read_match_globals(ScriptPath, St) ->
             },
             Config1 = maybe_add_strategy(Config0, Strategy),
             Config2 = maybe_add_bots(Config1, Bots, ScriptPath),
-            {ok, Config2};
+            Config3 = maybe_add_zone_config(Config2, LazyZones, ZoneIdleTimeout, MaxActiveZones),
+            Config4 = maybe_add_int(Config3, spatial_grid_cell_size, SpatialGridCellSize),
+            Config5 = maybe_add_int(Config4, cold_tick_divisor, ColdTickDivisor),
+            {ok, Config5};
         _ ->
             {error, {ScriptPath, ~"match_size must be a positive integer"}}
     end.
@@ -154,6 +169,30 @@ maybe_add_strategy(Config, Strategy) ->
         ~"skill_based" -> Config#{strategy => skill_based};
         Other -> Config#{strategy => Other}
     end.
+
+maybe_add_zone_config(Config, LazyZones, ZoneIdleTimeout, MaxActiveZones) ->
+    Config1 =
+        case LazyZones of
+            true -> Config#{lazy_zones => true};
+            false -> Config#{lazy_zones => false};
+            undefined -> Config
+        end,
+    Config2 =
+        case ZoneIdleTimeout of
+            ZIT when is_integer(ZIT), ZIT > 0 -> Config1#{zone_idle_timeout => ZIT};
+            _ -> Config1
+        end,
+    case MaxActiveZones of
+        MAZ when is_integer(MAZ), MAZ > 0 -> Config2#{max_active_zones => MAZ};
+        _ -> Config2
+    end.
+
+maybe_add_int(Config, _Key, undefined) ->
+    Config;
+maybe_add_int(Config, Key, Val) when is_integer(Val), Val > 0 ->
+    Config#{Key => Val};
+maybe_add_int(Config, _Key, _Val) ->
+    Config.
 
 maybe_add_bots(Config, undefined, _ScriptPath) ->
     Config;
@@ -211,6 +250,13 @@ do_file(Path, St) ->
 read_global_int(Name, St) ->
     case luerl:get_table_keys([Name], St) of
         {ok, Val, _} when is_number(Val) -> trunc(Val);
+        _ -> undefined
+    end.
+
+read_global_bool(Name, St) ->
+    case luerl:get_table_keys([Name], St) of
+        {ok, true, _} -> true;
+        {ok, false, _} -> false;
         _ -> undefined
     end.
 

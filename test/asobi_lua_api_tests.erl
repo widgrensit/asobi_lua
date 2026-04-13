@@ -32,7 +32,10 @@ api_test_() ->
         {"game.spatial.in_range checks distance", fun spatial_in_range/0},
         {"game.spatial.distance returns distance", fun spatial_distance/0},
         {"game.zone.spawn calls zone", fun zone_spawn/0},
-        {"game.zone.despawn calls zone", fun zone_despawn/0}
+        {"game.zone.despawn calls zone", fun zone_despawn/0},
+        {"game.spatial.query_radius zone-based", fun spatial_zone_query_radius/0},
+        {"game.spatial.query_rect zone-based", fun spatial_zone_query_rect/0},
+        {"game.spatial.query_rect errors without zone", fun spatial_query_rect_no_zone/0}
     ]}.
 
 setup() ->
@@ -78,6 +81,12 @@ setup() ->
     meck:expect(asobi_zone, spawn_entity, fun(_, _, _) -> ok end),
     meck:expect(asobi_zone, spawn_entity, fun(_, _, _, _) -> ok end),
     meck:expect(asobi_zone, despawn_entity, fun(_, _) -> ok end),
+    meck:expect(asobi_zone, query_radius, fun(_, _, _) ->
+        [{~"e1", {5.0, 5.0}}, {~"e2", {3.0, 4.0}}]
+    end),
+    meck:expect(asobi_zone, query_rect, fun(_, _, _) ->
+        [{~"e1", {5.0, 5.0}}]
+    end),
     ok.
 
 cleanup(_) ->
@@ -211,6 +220,35 @@ zone_despawn() ->
     Code = "return game.zone.despawn('entity-123')",
     {ok, [true | _], _} = eval(Code, St),
     ?assert(meck:called(asobi_zone, despawn_entity, '_')).
+
+spatial_zone_query_radius() ->
+    St = install_api_with_zone(),
+    Code =
+        "local results = game.spatial.query_radius(0.0, 0.0, 10.0)\n"
+        "local count = 0\n"
+        "for _ in pairs(results) do count = count + 1 end\n"
+        "return count",
+    {ok, [Count | _], _} = eval(Code, St),
+    ?assertEqual(2, trunc(Count)),
+    ?assert(meck:called(asobi_zone, query_radius, '_')).
+
+spatial_zone_query_rect() ->
+    St = install_api_with_zone(),
+    Code =
+        "local results = game.spatial.query_rect(0.0, 0.0, 10.0, 10.0)\n"
+        "local count = 0\n"
+        "for _ in pairs(results) do count = count + 1 end\n"
+        "return count",
+    {ok, [Count | _], _} = eval(Code, St),
+    ?assertEqual(1, trunc(Count)),
+    ?assert(meck:called(asobi_zone, query_rect, '_')).
+
+spatial_query_rect_no_zone() ->
+    St = install_api(),
+    Code = "return game.spatial.query_rect(0.0, 0.0, 10.0, 10.0)",
+    {ok, [Result | _], St1} = eval(Code, St),
+    Decoded = luerl:decode(Result, St1),
+    ?assert(lists:keymember(~"error", 1, Decoded)).
 
 %% --- Helpers ---
 

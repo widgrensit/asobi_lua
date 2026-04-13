@@ -22,6 +22,9 @@ function on_phase_started(phase_name, state) -- return updated state
 function on_phase_ended(phase_name, state)   -- return updated state
 function spawn_templates(config)             -- return template registry table
 function on_world_recovered(snapshots, state) -- return updated state
+function terrain_provider(config)            -- return {module, args} or nil
+function on_zone_loaded(cx, cy, state)       -- return zone_state, state
+function on_zone_unloaded(cx, cy, state)     -- return state
 ```
 """.
 
@@ -32,6 +35,7 @@ function on_world_recovered(snapshots, state) -- return updated state
 -export([generate_world/2, get_state/2]).
 -export([phases/1, on_phase_started/2, on_phase_ended/2]).
 -export([spawn_templates/1, on_world_recovered/2]).
+-export([terrain_provider/1, on_zone_loaded/2, on_zone_unloaded/2]).
 
 -define(TICK_TIMEOUT, 500).
 
@@ -215,7 +219,75 @@ on_world_recovered(Snapshots, #{lua_state := LuaSt, game_state := GS} = State) -
             {ok, State}
     end.
 
+%% --- Terrain & zone lifecycle ---
+
+-spec terrain_provider(map()) -> {module(), map()} | none.
+terrain_provider(#{lua_state := LuaSt} = _Config) ->
+    case asobi_lua_loader:call(terrain_provider, [#{}], LuaSt) of
+        {ok, [Result | _], LuaSt1} ->
+            decode_terrain_provider(Result, LuaSt1);
+        {error, _} ->
+            none
+    end;
+terrain_provider(_) ->
+    none.
+
+-spec on_zone_loaded({integer(), integer()}, map()) -> {ok, map(), map()}.
+on_zone_loaded({CX, CY}, #{lua_state := LuaSt, game_state := GS} = State) ->
+    case asobi_lua_loader:call(on_zone_loaded, [CX, CY, GS], LuaSt) of
+        {ok, [ZS, GS1 | _], LuaSt1} ->
+            ZoneState = decode_to_map(ZS, LuaSt1),
+            {ok, ZoneState, State#{lua_state => LuaSt1, game_state => GS1}};
+        {ok, [ZS | _], LuaSt1} ->
+            ZoneState = decode_to_map(ZS, LuaSt1),
+            {ok, ZoneState, State#{lua_state => LuaSt1}};
+        {error, _} ->
+            {ok, #{}, State}
+    end.
+
+-spec on_zone_unloaded({integer(), integer()}, map()) -> {ok, map()}.
+on_zone_unloaded({CX, CY}, #{lua_state := LuaSt, game_state := GS} = State) ->
+    case asobi_lua_loader:call(on_zone_unloaded, [CX, CY, GS], LuaSt) of
+        {ok, [GS1 | _], LuaSt1} ->
+            {ok, State#{lua_state => LuaSt1, game_state => GS1}};
+        {error, _} ->
+            {ok, State}
+    end.
+
 %% --- Internal ---
+
+decode_terrain_provider(Result, LuaSt) ->
+    Decoded = luerl:decode(Result, LuaSt),
+    case Decoded of
+        nil ->
+            none;
+        false ->
+            none;
+        Props when is_list(Props) ->
+            Module = proplists:get_value(~"module", Props),
+            Args = proplists:get_value(~"args", Props, []),
+            case Module of
+                undefined ->
+                    none;
+                ModBin when is_binary(ModBin) ->
+                    try
+                        Mod = binary_to_existing_atom(ModBin),
+                        DecodedArgs = deep_decode(Args),
+                        ProvArgs =
+                            case is_map(DecodedArgs) of
+                                true -> DecodedArgs;
+                                false -> #{}
+                            end,
+                        {Mod, ProvArgs}
+                    catch
+                        _:_ -> none
+                    end;
+                _ ->
+                    none
+            end;
+        _ ->
+            none
+    end.
 
 decode_position(PosTable, LuaSt) ->
     Decoded = luerl:decode(PosTable, LuaSt),

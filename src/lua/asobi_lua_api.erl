@@ -45,6 +45,8 @@ game.chat.send(channel_id, sender_id, content)
 -- Spatial queries (operate on entity tables)
 game.spatial.query_radius(entities, x, y, radius)
 game.spatial.query_radius(entities, x, y, radius, opts)
+game.spatial.query_radius(x, y, radius)              -- zone-based (requires zone_pid)
+game.spatial.query_rect(x1, y1, x2, y2)              -- zone-based (requires zone_pid)
 game.spatial.nearest(entities, x, y, n)
 game.spatial.nearest(entities, x, y, n, opts)
 game.spatial.in_range(entity_a, entity_b, range)
@@ -54,6 +56,10 @@ game.spatial.distance(entity_a, entity_b)
 game.zone.spawn(template_id, x, y)
 game.zone.spawn(template_id, x, y, overrides)
 game.zone.despawn(entity_id)
+
+-- Terrain (world mode only, requires terrain_store_pid in context)
+game.terrain.get_chunk(cx, cy)                   -- get compressed chunk data
+game.terrain.preload(coords_list)                -- preload chunks async
 ```
 """.
 
@@ -68,7 +74,8 @@ install(Ctx, St0) ->
     St4 = create_table([~"game", ~"storage"], St3),
     St5a = create_table([~"game", ~"chat"], St4),
     St5b = create_table([~"game", ~"spatial"], St5a),
-    St5 = create_table([~"game", ~"zone"], St5b),
+    St5c = create_table([~"game", ~"zone"], St5b),
+    St5 = create_table([~"game", ~"terrain"], St5c),
     Fns = [
         %% Core
         {[~"game", ~"id"], fun_id()},
@@ -95,13 +102,17 @@ install(Ctx, St0) ->
         %% Chat
         {[~"game", ~"chat", ~"send"], fun_chat_send()},
         %% Spatial
-        {[~"game", ~"spatial", ~"query_radius"], fun_spatial_query_radius()},
+        {[~"game", ~"spatial", ~"query_radius"], fun_spatial_query_radius(Ctx)},
+        {[~"game", ~"spatial", ~"query_rect"], fun_spatial_query_rect(Ctx)},
         {[~"game", ~"spatial", ~"nearest"], fun_spatial_nearest()},
         {[~"game", ~"spatial", ~"in_range"], fun_spatial_in_range()},
         {[~"game", ~"spatial", ~"distance"], fun_spatial_distance()},
         %% Zone spawning
         {[~"game", ~"zone", ~"spawn"], fun_zone_spawn(Ctx)},
-        {[~"game", ~"zone", ~"despawn"], fun_zone_despawn(Ctx)}
+        {[~"game", ~"zone", ~"despawn"], fun_zone_despawn(Ctx)},
+        %% Terrain
+        {[~"game", ~"terrain", ~"get_chunk"], fun_terrain_get_chunk(Ctx)},
+        {[~"game", ~"terrain", ~"preload"], fun_terrain_preload(Ctx)}
     ],
     lists:foldl(
         fun({Path, Fn}, St) ->
@@ -387,9 +398,17 @@ fun_chat_send() ->
 
 %% --- Spatial ---
 
-fun_spatial_query_radius() ->
+fun_spatial_query_radius(Ctx) ->
     fun(Args, St) ->
         case decode_args(Args, St) of
+            [X, Y, Radius] when is_number(X), is_number(Y), is_number(Radius) ->
+                case maps:find(zone_pid, Ctx) of
+                    {ok, ZonePid} ->
+                        Results = asobi_zone:query_radius(ZonePid, {X, Y}, Radius),
+                        encode_zone_spatial_results(Results, St);
+                    error ->
+                        error_result(~"query_radius(x, y, radius) requires zone context", St)
+                end;
             [Entities, X, Y, Radius] when
                 is_map(Entities), is_number(X), is_number(Y), is_number(Radius)
             ->
@@ -404,9 +423,26 @@ fun_spatial_query_radius() ->
                 ),
                 encode_spatial_results(Results, St);
             _ ->
-                error_result(~"query_radius requires (entities, x, y, radius[, opts])", St)
+                error_result(
+                    ~"query_radius requires (x, y, radius) or (entities, x, y, radius[, opts])", St
+                )
         end
     end.
+
+fun_spatial_query_rect(#{zone_pid := ZonePid}) ->
+    fun(Args, St) ->
+        case decode_args(Args, St) of
+            [X1, Y1, X2, Y2] when
+                is_number(X1), is_number(Y1), is_number(X2), is_number(Y2)
+            ->
+                Results = asobi_zone:query_rect(ZonePid, {X1, Y1}, {X2, Y2}),
+                encode_zone_spatial_results(Results, St);
+            _ ->
+                error_result(~"query_rect requires (x1, y1, x2, y2)", St)
+        end
+    end;
+fun_spatial_query_rect(_) ->
+    fun(_, St) -> error_result(~"query_rect requires zone context", St) end.
 
 fun_spatial_nearest() ->
     fun(Args, St) ->
@@ -451,6 +487,14 @@ encode_spatial_results(Results, St) ->
     Encoded = [
         #{~"id" => Id, ~"entity" => Entity, ~"distance" => Dist}
      || {Id, Entity, Dist} <- Results
+    ],
+    {Enc, St1} = luerl:encode(Encoded, St),
+    {[Enc], St1}.
+
+encode_zone_spatial_results(Results, St) ->
+    Encoded = [
+        #{~"id" => Id, ~"x" => X, ~"y" => Y}
+     || {Id, {X, Y}} <- Results
     ],
     {Enc, St1} = luerl:encode(Encoded, St),
     {[Enc], St1}.
@@ -514,6 +558,54 @@ fun_zone_despawn(#{zone_pid := ZonePid}) ->
     end;
 fun_zone_despawn(_) ->
     fun(_, St) -> error_result(~"zone.despawn not available (no zone context)", St) end.
+
+%% --- Terrain ---
+
+fun_terrain_get_chunk(#{terrain_store_pid := Pid}) when is_pid(Pid) ->
+    fun(Args, St) ->
+        case decode_args(Args, St) of
+            [CX, CY] when is_number(CX), is_number(CY) ->
+                case asobi_terrain_store:get_chunk(Pid, {trunc(CX), trunc(CY)}) of
+                    {ok, Data} ->
+                        ok_result(Data, St);
+                    {error, Reason} ->
+                        error_result(Reason, St)
+                end;
+            _ ->
+                error_result(~"get_chunk requires (cx, cy)", St)
+        end
+    end;
+fun_terrain_get_chunk(_) ->
+    fun(_, St) -> error_result(~"terrain not available (no terrain store)", St) end.
+
+fun_terrain_preload(#{terrain_store_pid := Pid}) when is_pid(Pid) ->
+    fun(Args, St) ->
+        case decode_args(Args, St) of
+            [CoordsList] when is_list(CoordsList) ->
+                Coords = lists:filtermap(
+                    fun
+                        (M) when is_map(M) ->
+                            CX = maps:get(~"cx", M, maps:get(~"x", M, undefined)),
+                            CY = maps:get(~"cy", M, maps:get(~"y", M, undefined)),
+                            case {CX, CY} of
+                                {X, Y} when is_number(X), is_number(Y) ->
+                                    {true, {trunc(X), trunc(Y)}};
+                                _ ->
+                                    false
+                            end;
+                        (_) ->
+                            false
+                    end,
+                    CoordsList
+                ),
+                asobi_terrain_store:preload_chunks(Pid, Coords),
+                {[true], St};
+            _ ->
+                error_result(~"preload requires (coords_list)", St)
+        end
+    end;
+fun_terrain_preload(_) ->
+    fun(_, St) -> error_result(~"terrain not available (no terrain store)", St) end.
 
 %% --- Storage helpers ---
 

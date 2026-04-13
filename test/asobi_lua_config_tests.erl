@@ -33,7 +33,9 @@ config_test_() ->
             {"multi mode: loads config.lua manifest", fun multi_mode_manifest/0},
             {"no config files: no-op", fun no_config_noop/0},
             {"bot names: reads from bot script", fun bot_names_from_script/0},
-            {"bot names: falls back to defaults", fun bot_names_fallback/0}
+            {"bot names: falls back to defaults", fun bot_names_fallback/0},
+            {"world config: reads zone settings", fun world_config_zone_settings/0},
+            {"world config: reads phase 2 settings", fun world_config_phase2_settings/0}
         ]}.
 
 single_mode_loads_globals() ->
@@ -117,6 +119,32 @@ bot_names_fallback() ->
         {ok, false, _} -> ok;
         _ -> ?assert(false)
     end.
+
+world_config_zone_settings() ->
+    TmpDir = make_temp_dir(),
+    {ok, Content} = file:read_file(fixture("config_world.lua")),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), Content),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Modes = get_game_modes(),
+    Mode = maps:get(~"default", Modes),
+    ?assertEqual(true, maps:get(lazy_zones, Mode)),
+    ?assertEqual(60000, maps:get(zone_idle_timeout, Mode)),
+    ?assertEqual(500, maps:get(max_active_zones, Mode)),
+    cleanup_temp_dir(TmpDir).
+
+world_config_phase2_settings() ->
+    TmpDir = make_temp_dir(),
+    {ok, Content} = file:read_file(fixture("config_world_phase2.lua")),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), Content),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Modes = get_game_modes(),
+    Mode = maps:get(~"default", Modes),
+    ?assertEqual(64, maps:get(spatial_grid_cell_size, Mode)),
+    ?assertEqual(5, maps:get(cold_tick_divisor, Mode)),
+    ?assertEqual(true, maps:get(lazy_zones, Mode)),
+    cleanup_temp_dir(TmpDir).
 
 %% --- Helpers ---
 
