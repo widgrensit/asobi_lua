@@ -156,6 +156,11 @@ bots         = { script = "bots/ai.lua" } -- optional: enable bot filling
 | `max_players` | no | `match_size` | Maximum players per match |
 | `strategy` | no | `"fill"` | Matchmaking strategy |
 | `bots` | no | none | Bot configuration (see [Bots](lua-bots.md)) |
+| `lazy_zones` | no | auto | On-demand zone loading (auto-enabled for grids > 100) |
+| `zone_idle_timeout` | no | 30000 | Milliseconds before an idle zone is reaped |
+| `max_active_zones` | no | 10000 | Maximum concurrent zones in memory |
+| `spatial_grid_cell_size` | no | none | Cell size for spatial grid indexing (enables grid acceleration) |
+| `cold_tick_divisor` | no | 10 | Tick rate divisor for cold (unoccupied) zones |
 
 ## Using with Erlang Projects
 
@@ -445,6 +450,93 @@ Your Lua scripts have access to:
 
 For safety, filesystem and OS functions (`io`, `os.execute`, `loadfile`) are
 **not** available. Your scripts run sandboxed inside the BEAM.
+
+## World Mode: Large Sessions with Zones
+
+For persistent or large-area games (MMOs, open worlds), use world mode instead
+of match mode. World scripts support zone lifecycle and terrain features.
+
+### Zone Configuration
+
+Set zone globals at the top of your world script:
+
+```lua
+match_size = 1
+max_players = 100
+lazy_zones = true              -- load zones on demand
+zone_idle_timeout = 60000      -- reap idle zones after 60s
+max_active_zones = 500         -- cap concurrent zones
+spatial_grid_cell_size = 64    -- spatial grid cell size for fast queries
+cold_tick_divisor = 5          -- tick slower in unoccupied zones
+```
+
+### Terrain Provider (optional)
+
+Return a terrain provider module from `terrain_provider()`. The provider
+supplies compressed chunk data for each zone coordinate.
+
+```lua
+function terrain_provider(config)
+    return {
+        module = "my_terrain_provider",
+        args = { tileset = "overworld" }
+    }
+end
+```
+
+Return `nil` to disable terrain.
+
+### Zone Lifecycle Callbacks (optional)
+
+```lua
+function on_zone_loaded(cx, cy, state)
+    -- Called when a zone is lazily loaded
+    local zone_state = { biome = "plains", spawned = false }
+    return zone_state, state
+end
+
+function on_zone_unloaded(cx, cy, state)
+    -- Called when a zone is reaped after idle timeout
+    return state
+end
+```
+
+### Terrain API
+
+Inside your game scripts, query terrain via the `game.terrain` namespace:
+
+```lua
+-- Get compressed chunk data for a coordinate
+local result = game.terrain.get_chunk(3, 7)
+
+-- Preload chunks around the player
+game.terrain.preload({
+    { cx = 3, cy = 7 },
+    { cx = 4, cy = 7 },
+    { cx = 3, cy = 8 }
+})
+```
+
+### Spatial Queries (Zone-Based)
+
+Query entities in the current zone by position. These use the zone's spatial
+grid when `spatial_grid_cell_size` is set, falling back to brute-force scan.
+
+```lua
+-- Find all entities within radius of a point
+local nearby = game.spatial.query_radius(100, 200, 50)
+for _, hit in ipairs(nearby) do
+    print(hit.id, hit.x, hit.y)
+end
+
+-- Find all entities inside a rectangle
+local in_area = game.spatial.query_rect(0, 0, 400, 300)
+```
+
+Both return a list of `{id, x, y}` tables.
+
+The entity-table variants (`game.spatial.query_radius(entities, x, y, radius)`)
+still work for client-side filtering without a zone process.
 
 ## Next Steps
 
