@@ -1,0 +1,21 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  ci:
+    uses: Taure/erlang-ci/.github/workflows/ci.yml@main
+    permissions:
+      contents: write
+      pull-requests: write
+    with:
+      otp-version: '28.0.1'
+      rebar3-version: '3.27.0'
+      enable-audit: true
+      enable-dependency-submission: true
+      enable-summary: true
+    secrets: inherit
