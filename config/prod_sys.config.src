@@ -1,32 +1,57 @@
 [
-    {asobi, [
-        {port, 8080},
-        {game_dir, "/app/game"}
-    ]},
-    {asobi_lua, []},
-    {nova, [
-        {cowboy_configuration, #{
-            port => ${ASOBI_PORT}
-        }},
-        {use_stacktrace, false}
-    ]},
-    {kura, [
-        {repos, [
-            {asobi_repo, #{
-                pool_size => 10,
-                host => "${ASOBI_DB_HOST}",
-                database => "${ASOBI_DB_NAME}",
-                user => "${ASOBI_DB_USER}",
-                password => "${ASOBI_DB_PASSWORD}"
-            }}
-        ]}
-    ]},
     {kernel, [
         {logger_level, info},
         {logger, [
             {handler, default, logger_std_h, #{
-                formatter => {nova_jsonlogger, #{}}
+                formatter => {nova_jsonlogger, #{
+                    map_depth => 3,
+                    term_depth => 50
+                }}
             }}
         ]}
-    ]}
+    ]},
+    {nova_auth, [
+        {pbkdf2_iterations, 100000}
+    ]},
+    {nova, [
+        {use_stacktrace, false},
+        {environment, prod},
+        {cowboy_configuration, #{
+            port => ${ASOBI_PORT}
+        }},
+        {dev_mode, false},
+        {bootstrap_application, asobi},
+        {json_lib, json},
+        {plugins, [
+            {pre_request, nova_request_plugin, #{
+                decode_json_body => true,
+                parse_qs => true
+            }},
+            {pre_request, nova_cors_plugin, #{
+                allow_origins => <<"${ASOBI_CORS_ORIGINS}">>
+            }},
+            {pre_request, nova_correlation_plugin, #{}},
+            {post_request, asobi_security_headers_plugin, #{}}
+        ]}
+    ]},
+    {kura, [
+        {repo, asobi_repo},
+        {host, "${ASOBI_DB_HOST}"},
+        {port, 5432},
+        {database, "${ASOBI_DB_NAME}"},
+        {user, "${ASOBI_DB_USER}"},
+        {password, "${ASOBI_DB_PASSWORD}"},
+        {pool_size, 10}
+    ]},
+    {asobi, [
+        {game_dir, "/app/game"}
+    ]},
+    {asobi_lua, []},
+    {shigoto, [
+        {pool, asobi_repo},
+        {poll_interval, 200},
+        {queues, [{~"default", 10}]},
+        {fanout_queues, [{~"broadcast", 5, #{window => 120}}]}
+    ]},
+    {pg, [{scope, [nova_scope, asobi_presence, asobi_chat]}]}
 ].
