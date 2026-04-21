@@ -41,11 +41,13 @@ init_ok() ->
 
 init_bad_script() ->
     Config = #{lua_script => fixture("bad_script.lua")},
-    {error, _} = asobi_lua_match:init(Config).
+    %% asobi_match:init/1 is specced {ok, term()} — errors crash the
+    %% process so the supervisor sees the failure with a proper reason.
+    ?assertError({lua_load_failed, _, _}, asobi_lua_match:init(Config)).
 
 init_missing_script() ->
     Config = #{lua_script => fixture("nonexistent.lua")},
-    {error, _} = asobi_lua_match:init(Config).
+    ?assertError({lua_load_failed, _, _}, asobi_lua_match:init(Config)).
 
 join_adds_player() ->
     {ok, State0} = init_match(),

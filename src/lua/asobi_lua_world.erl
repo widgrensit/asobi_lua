@@ -39,9 +39,16 @@ function on_zone_unloaded(cx, cy, state)     -- return state
 
 -define(TICK_TIMEOUT, 500).
 
--spec init(map()) -> {ok, map()} | {error, term()}.
+-spec init(map()) -> {ok, map()}.
 init(Config) ->
-    ScriptPath = maps:get(lua_script, Config, undefined),
+    ScriptPath =
+        case maps:get(lua_script, Config, undefined) of
+            P when is_binary(P); is_list(P) ->
+                P;
+            undefined ->
+                logger:error(#{msg => ~"asobi_lua_world init: missing lua_script", config => Config}),
+                erlang:error({missing_lua_script, Config})
+        end,
     GameConfig = maps:get(game_config, Config, #{}),
     case asobi_lua_loader:new(ScriptPath) of
         {ok, LuaSt0} ->
@@ -55,12 +62,26 @@ init(Config) ->
                 {ok, [GameState | _], LuaSt2} ->
                     {ok, #{lua_state => LuaSt2, game_state => GameState, script => ScriptPath}};
                 {ok, [], _} ->
-                    {error, {lua_error, ~"init() must return a table"}};
+                    logger:error(#{
+                        msg => ~"asobi_lua_world init: lua init() returned no value",
+                        script => ScriptPath
+                    }),
+                    erlang:error({lua_error, ~"init() must return a table"});
                 {error, Reason} ->
-                    {error, {lua_init_failed, Reason}}
+                    logger:error(#{
+                        msg => ~"asobi_lua_world init: lua init() failed",
+                        script => ScriptPath,
+                        reason => Reason
+                    }),
+                    erlang:error({lua_init_failed, Reason})
             end;
         {error, Reason} ->
-            {error, {lua_load_failed, ScriptPath, Reason}}
+            logger:error(#{
+                msg => ~"asobi_lua_world init: lua_loader:new/1 failed",
+                script => ScriptPath,
+                reason => Reason
+            }),
+            erlang:error({lua_load_failed, ScriptPath, Reason})
     end.
 
 -spec join(binary(), map()) -> {ok, map()} | {error, term()}.
@@ -290,10 +311,14 @@ decode_terrain_provider(Result, LuaSt) ->
     end.
 
 decode_position(PosTable, LuaSt) ->
-    Decoded = luerl:decode(PosTable, LuaSt),
-    X = proplists:get_value(~"x", Decoded, 0.0),
-    Y = proplists:get_value(~"y", Decoded, 0.0),
-    {to_number(X), to_number(Y)}.
+    case luerl:decode(PosTable, LuaSt) of
+        Decoded when is_list(Decoded) ->
+            X = proplists:get_value(~"x", Decoded, 0.0),
+            Y = proplists:get_value(~"y", Decoded, 0.0),
+            {to_number(X), to_number(Y)};
+        _ ->
+            {0.0, 0.0}
+    end.
 
 check_post_tick_result(GS, LuaSt) ->
     try
@@ -316,48 +341,53 @@ check_post_tick_result(GS, LuaSt) ->
     end.
 
 decode_zone_states(ZoneStatesRef, LuaSt) ->
-    Decoded = luerl:decode(ZoneStatesRef, LuaSt),
-    lists:foldl(
-        fun
-            ({Key, Val}, Acc) when is_binary(Key) ->
-                case parse_coords(Key) of
-                    {ok, Coords} -> Acc#{Coords => deep_decode(Val)};
-                    error -> Acc
-                end;
-            (_, Acc) ->
-                Acc
-        end,
-        #{},
-        Decoded
-    ).
+    case luerl:decode(ZoneStatesRef, LuaSt) of
+        Decoded when is_list(Decoded) -> decode_zone_states_acc(Decoded, #{});
+        _ -> #{}
+    end.
+
+-spec decode_zone_states_acc(list(), map()) -> map().
+decode_zone_states_acc([], Acc) ->
+    Acc;
+decode_zone_states_acc([{Key, Val} | Rest], Acc) when is_binary(Key) ->
+    case parse_coords(Key) of
+        {ok, Coords} -> decode_zone_states_acc(Rest, Acc#{Coords => deep_decode(Val)});
+        error -> decode_zone_states_acc(Rest, Acc)
+    end;
+decode_zone_states_acc([_ | Rest], Acc) ->
+    decode_zone_states_acc(Rest, Acc).
 
 decode_phases(PhasesRef, LuaSt) ->
-    Decoded = luerl:decode(PhasesRef, LuaSt),
-    lists:filtermap(
-        fun
-            ({_, PhaseProps}) when is_list(PhaseProps) ->
-                Name = proplists:get_value(~"name", PhaseProps),
-                case Name of
-                    undefined ->
-                        false;
-                    _ ->
-                        Phase0 = #{name => Name},
-                        Phase1 = maybe_add(
-                            Phase0, duration, PhaseProps, ~"duration", fun to_integer/1
-                        ),
-                        Phase2 = maybe_add(
-                            Phase1, start, PhaseProps, ~"start", fun decode_phase_start/1
-                        ),
-                        Phase3 = maybe_add(
-                            Phase2, config, PhaseProps, ~"config", fun deep_decode/1
-                        ),
-                        {true, Phase3}
-                end;
-            (_) ->
-                false
-        end,
-        Decoded
-    ).
+    case luerl:decode(PhasesRef, LuaSt) of
+        Decoded when is_list(Decoded) ->
+            lists:filtermap(
+                fun
+                    ({_, PhaseProps}) when is_list(PhaseProps) ->
+                        Name = proplists:get_value(~"name", PhaseProps),
+                        case Name of
+                            undefined ->
+                                false;
+                            _ ->
+                                Phase0 = #{name => Name},
+                                Phase1 = maybe_add(
+                                    Phase0, duration, PhaseProps, ~"duration", fun to_integer/1
+                                ),
+                                Phase2 = maybe_add(
+                                    Phase1, start, PhaseProps, ~"start", fun decode_phase_start/1
+                                ),
+                                Phase3 = maybe_add(
+                                    Phase2, config, PhaseProps, ~"config", fun deep_decode/1
+                                ),
+                                {true, Phase3}
+                        end;
+                    (_) ->
+                        false
+                end,
+                Decoded
+            );
+        _ ->
+            []
+    end.
 
 decode_phase_start(~"prev_ended") ->
     prev_ended;
@@ -423,33 +453,34 @@ to_integer(N) when is_number(N) -> trunc(N);
 to_integer(_) -> 0.
 
 decode_spawn_templates(TemplatesRef, LuaSt) ->
-    Decoded = luerl:decode(TemplatesRef, LuaSt),
-    lists:foldl(
-        fun
-            ({TemplateId, Props}, Acc) when is_binary(TemplateId), is_list(Props) ->
-                Type = proplists:get_value(~"type", Props, ~"npc"),
-                BaseState = deep_decode(proplists:get_value(~"base_state", Props, [])),
-                Base =
-                    case is_map(BaseState) of
-                        true -> BaseState;
-                        false -> #{}
-                    end,
-                Template = #{
-                    template_id => TemplateId,
-                    type => Type,
-                    base_state => Base,
-                    persistent => proplists:get_value(~"persistent", Props, true),
-                    respawn => decode_respawn_rule(
-                        proplists:get_value(~"respawn", Props, nil)
-                    )
-                },
-                Acc#{TemplateId => Template};
-            (_, Acc) ->
-                Acc
+    case luerl:decode(TemplatesRef, LuaSt) of
+        Decoded when is_list(Decoded) -> decode_spawn_templates_acc(Decoded, #{});
+        _ -> #{}
+    end.
+
+-spec decode_spawn_templates_acc(list(), map()) -> map().
+decode_spawn_templates_acc([], Acc) ->
+    Acc;
+decode_spawn_templates_acc([{TemplateId, Props} | Rest], Acc) when
+    is_binary(TemplateId), is_list(Props)
+->
+    Type = proplists:get_value(~"type", Props, ~"npc"),
+    BaseState = deep_decode(proplists:get_value(~"base_state", Props, [])),
+    Base =
+        case is_map(BaseState) of
+            true -> BaseState;
+            false -> #{}
         end,
-        #{},
-        Decoded
-    ).
+    Template = #{
+        template_id => TemplateId,
+        type => Type,
+        base_state => Base,
+        persistent => proplists:get_value(~"persistent", Props, true),
+        respawn => decode_respawn_rule(proplists:get_value(~"respawn", Props, nil))
+    },
+    decode_spawn_templates_acc(Rest, Acc#{TemplateId => Template});
+decode_spawn_templates_acc([_ | Rest], Acc) ->
+    decode_spawn_templates_acc(Rest, Acc).
 
 decode_respawn_rule(nil) ->
     undefined;

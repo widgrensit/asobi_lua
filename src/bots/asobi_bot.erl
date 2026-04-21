@@ -223,24 +223,34 @@ handle_vote_start(VotePayload, #{match_pid := MatchPid, bot_id := BotId} = State
         end,
     {noreply, State#{phase => voting}}.
 
+-spec pick_random_option([map()]) -> term().
 pick_random_option([]) ->
     undefined;
 pick_random_option(Options) ->
     Idx = rand:uniform(length(Options)),
     Opt = lists:nth(Idx, Options),
-    maps:get(id, Opt, maps:get(~"id", Opt, undefined)).
+    case is_map(Opt) of
+        true -> maps:get(id, Opt, maps:get(~"id", Opt, undefined));
+        false -> undefined
+    end.
 
+-spec decode_result(term(), term()) -> map().
 decode_result(Result, _LuaSt) when is_map(Result) ->
     Result;
 decode_result(Result, LuaSt) ->
     case luerl:decode(Result, LuaSt) of
-        [{K, _} | _] = PropList when is_binary(K) ->
-            maps:from_list(PropList);
-        M when is_map(M) ->
-            M;
-        _ ->
-            #{}
+        L when is_list(L) -> props_to_map(L, #{});
+        M when is_map(M) -> M;
+        _ -> #{}
     end.
+
+-spec props_to_map(list(), map()) -> map().
+props_to_map([], Acc) ->
+    Acc;
+props_to_map([{K, V} | T], Acc) when is_binary(K) ->
+    props_to_map(T, Acc#{K => V});
+props_to_map([_ | T], Acc) ->
+    props_to_map(T, Acc).
 
 %% --- Helpers ---
 
