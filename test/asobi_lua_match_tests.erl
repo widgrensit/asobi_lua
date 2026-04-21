@@ -1,5 +1,6 @@
 -module(asobi_lua_match_tests).
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("kernel/include/file.hrl").
 
 -spec fixture(string()) -> file:filename_all().
 fixture(Name) ->
@@ -30,7 +31,9 @@ lua_match_test_() ->
         {"vote_requested returns config at right tick", fun vote_requested_ok/0},
         {"vote_requested returns none normally", fun vote_requested_none/0},
         {"vote_resolved updates state", fun vote_resolved_ok/0},
-        {"finish_immediately script", fun finish_immediately/0}
+        {"finish_immediately script", fun finish_immediately/0},
+        {"tick reloads script after file change", fun hot_reload_on_file_change/0},
+        {"tick survives syntax error on reload", fun hot_reload_syntax_error/0}
     ].
 
 init_ok() ->
@@ -132,6 +135,83 @@ finish_immediately() ->
             ?assert(false)
     end.
 
+hot_reload_on_file_change() ->
+    %% Write a temp match script, init a match, modify the file, tick,
+    %% verify the changed global is visible via get_state.
+    Path = temp_script(
+        ~"""
+        match_size = 1
+        tag = "before"
+        function init(_) return { n = 0 } end
+        function join(id, s) s.players = s.players or {}; s.players[id] = {}; return s end
+        function leave(id, s) s.players[id] = nil; return s end
+        function handle_input(_, _, s) return s end
+        function tick(s) s.n = s.n + 1; return s end
+        function get_state(_, s) return { tag = tag, n = s.n } end
+    """
+    ),
+    try
+        {ok, S0} = asobi_lua_match:init(#{lua_script => Path}),
+        {ok, S1} = asobi_lua_match:join(~"p1", S0),
+        #{~"tag" := BeforeTag} = asobi_lua_match:get_state(~"p1", S1),
+        ?assertEqual(~"before", BeforeTag),
+
+        write_script(
+            Path,
+            ~"""
+            match_size = 1
+            tag = "after"
+            function init(_) return { n = 0 } end
+            function join(id, s) s.players = s.players or {}; s.players[id] = {}; return s end
+            function leave(id, s) s.players[id] = nil; return s end
+            function handle_input(_, _, s) return s end
+            function tick(s) s.n = s.n + 1; return s end
+            function get_state(_, s) return { tag = tag, n = s.n } end
+        """
+        ),
+        %% filelib:last_modified/1 has 1-second resolution on POSIX, and
+        %% file:write_file updates mtime to the current second which can
+        %% equal the init-time mtime. Bump after writing so the reload
+        %% check fires deterministically.
+        bump_mtime(Path),
+
+        {ok, S2} = asobi_lua_match:tick(S1),
+        #{~"tag" := AfterTag} = asobi_lua_match:get_state(~"p1", S2),
+        ?assertEqual(~"after", AfterTag)
+    after
+        file:delete(Path)
+    end.
+
+hot_reload_syntax_error() ->
+    %% A broken reload should not crash the match or wipe game state —
+    %% the match keeps running on the previous (good) script.
+    Path = temp_script(
+        ~"""
+        match_size = 1
+        tag = "good"
+        function init(_) return { n = 0 } end
+        function join(id, s) s.players = s.players or {}; s.players[id] = {}; return s end
+        function leave(id, s) s.players[id] = nil; return s end
+        function handle_input(_, _, s) return s end
+        function tick(s) s.n = s.n + 1; return s end
+        function get_state(_, s) return { tag = tag, n = s.n } end
+    """
+    ),
+    try
+        {ok, S0} = asobi_lua_match:init(#{lua_script => Path}),
+        {ok, S1} = asobi_lua_match:join(~"p1", S0),
+
+        write_script(Path, ~"tag = \"broken\"  !!this is not lua"),
+        bump_mtime(Path),
+
+        {ok, S2} = asobi_lua_match:tick(S1),
+        %% The old code still runs, so `tag` is still "good".
+        #{~"tag" := Tag} = asobi_lua_match:get_state(~"p1", S2),
+        ?assertEqual(~"good", Tag)
+    after
+        file:delete(Path)
+    end.
+
 %% --- Helpers ---
 
 -spec init_match() -> {ok, map()}.
@@ -147,3 +227,26 @@ tick_n(N, State) ->
         {ok, S} -> tick_n(N - 1, S);
         {finished, _, S} -> tick_n(N - 1, S)
     end.
+
+-spec temp_script(binary()) -> file:filename_all().
+temp_script(Code) ->
+    Name = "hot_reload_" ++ integer_to_list(erlang:unique_integer([positive])) ++ ".lua",
+    Path = filename:join([filename:basedir(user_cache, "asobi_lua_tests"), Name]),
+    ok = filelib:ensure_dir(Path),
+    write_script(Path, Code),
+    Path.
+
+-spec write_script(file:filename_all(), binary()) -> ok.
+write_script(Path, Code) ->
+    ok = file:write_file(Path, Code).
+
+-spec bump_mtime(file:filename_all()) -> ok.
+bump_mtime(Path) ->
+    {ok, FI} = file:read_file_info(Path, [{time, local}]),
+    %% Nudge mtime forward by 2 seconds so filelib:last_modified/1 reports
+    %% a different value than on the previous check.
+    {{Y, M, D}, {H, Mi, S}} = FI#file_info.mtime,
+    NewMtime = calendar:gregorian_seconds_to_datetime(
+        calendar:datetime_to_gregorian_seconds({{Y, M, D}, {H, Mi, S}}) + 2
+    ),
+    ok = file:write_file_info(Path, FI#file_info{mtime = NewMtime}).
