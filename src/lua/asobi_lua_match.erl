@@ -40,9 +40,16 @@ function vote_resolved(template, result, state) -- return updated state
 
 -define(TICK_TIMEOUT, 500).
 
--spec init(map()) -> {ok, map()} | {error, term()}.
+-spec init(map()) -> {ok, map()}.
 init(Config) ->
-    ScriptPath = maps:get(lua_script, Config, undefined),
+    ScriptPath =
+        case maps:get(lua_script, Config, undefined) of
+            P when is_binary(P); is_list(P) ->
+                P;
+            undefined ->
+                logger:error(#{msg => ~"asobi_lua_match init: missing lua_script", config => Config}),
+                erlang:error({missing_lua_script, Config})
+        end,
     GameConfig = maps:get(game_config, Config, #{}),
     case asobi_lua_loader:new(ScriptPath) of
         {ok, LuaSt0} ->
@@ -56,12 +63,28 @@ init(Config) ->
                 {ok, [GameState | _], LuaSt2} ->
                     {ok, #{lua_state => LuaSt2, game_state => GameState, script => ScriptPath}};
                 {ok, [], _} ->
-                    {error, {lua_error, ~"init() must return a table"}};
+                    %% asobi_match:init/1 doesn't allow an error return; log and
+                    %% crash so the supervisor handles it with full context.
+                    logger:error(#{
+                        msg => ~"asobi_lua_match init: lua init() returned no value",
+                        script => ScriptPath
+                    }),
+                    erlang:error({lua_error, ~"init() must return a table"});
                 {error, Reason} ->
-                    {error, {lua_init_failed, Reason}}
+                    logger:error(#{
+                        msg => ~"asobi_lua_match init: lua init() failed",
+                        script => ScriptPath,
+                        reason => Reason
+                    }),
+                    erlang:error({lua_init_failed, Reason})
             end;
         {error, Reason} ->
-            {error, {lua_load_failed, ScriptPath, Reason}}
+            logger:error(#{
+                msg => ~"asobi_lua_match init: lua_loader:new/1 failed",
+                script => ScriptPath,
+                reason => Reason
+            }),
+            erlang:error({lua_load_failed, ScriptPath, Reason})
     end.
 
 -spec join(binary(), map()) -> {ok, map()} | {error, term()}.

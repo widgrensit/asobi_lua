@@ -725,9 +725,17 @@ sanitize(V) ->
 -spec to_map(term()) -> map().
 to_map(M) when is_map(M) -> M;
 to_map([{K, _} | _] = PropList) when is_binary(K) ->
-    maps:from_list(PropList);
+    to_map_acc(PropList, #{});
 to_map(_) ->
     #{}.
+
+-spec to_map_acc(list(), map()) -> map().
+to_map_acc([], Acc) ->
+    Acc;
+to_map_acc([{K, V} | T], Acc) when is_binary(K) ->
+    to_map_acc(T, Acc#{K => V});
+to_map_acc([_ | T], Acc) ->
+    to_map_acc(T, Acc).
 
 -spec ensure_pairs([term()]) -> [{term(), term()}].
 ensure_pairs(L) ->

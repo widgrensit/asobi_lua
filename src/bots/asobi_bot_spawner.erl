@@ -84,24 +84,24 @@ fill_mode(_, _) ->
 
 %% --- Match Scanning ---
 
+-spec scan_for_bot_players(map()) -> map().
 scan_for_bot_players(Known) ->
     Groups = pg:which_groups(?PG_SCOPE),
-    lists:foldl(
-        fun
-            ({asobi_match_server, MatchId}, Acc) when is_binary(MatchId) ->
-                case maps:is_key(MatchId, Acc) of
-                    true ->
-                        Acc;
-                    false ->
-                        start_bots_for_match(MatchId),
-                        Acc#{MatchId => true}
-                end;
-            (_, Acc) ->
-                Acc
-        end,
-        Known,
-        Groups
-    ).
+    scan_groups(Groups, Known).
+
+-spec scan_groups(list(), map()) -> map().
+scan_groups([], Acc) ->
+    Acc;
+scan_groups([{asobi_match_server, MatchId} | Rest], Acc) when is_binary(MatchId) ->
+    case maps:is_key(MatchId, Acc) of
+        true ->
+            scan_groups(Rest, Acc);
+        false ->
+            start_bots_for_match(MatchId),
+            scan_groups(Rest, Acc#{MatchId => true})
+    end;
+scan_groups([_ | Rest], Acc) ->
+    scan_groups(Rest, Acc).
 
 start_bots_for_match(MatchId) ->
     case pg:get_members(?PG_SCOPE, {asobi_match_server, MatchId}) of
@@ -111,13 +111,18 @@ start_bots_for_match(MatchId) ->
                     BotScript = bot_script(Mode),
                     BotPlayers = [Id || Id <- Players, is_bot(Id)],
                     lists:foreach(
-                        fun(BotId) ->
-                            case asobi_bot_sup:start_bot(MatchPid, BotId, BotScript) of
-                                {ok, _} ->
-                                    logger:info(#{msg => ~"bot AI started", bot_id => BotId});
-                                {error, _} ->
-                                    ok
-                            end
+                        fun
+                            (BotId) when is_binary(BotId) ->
+                                case asobi_bot_sup:start_bot(MatchPid, BotId, BotScript) of
+                                    {ok, _} ->
+                                        logger:info(#{
+                                            msg => ~"bot AI started", bot_id => BotId
+                                        });
+                                    {error, _} ->
+                                        ok
+                                end;
+                            (_) ->
+                                ok
                         end,
                         BotPlayers
                     );
@@ -175,8 +180,10 @@ is_bot(<<"bot_", _/binary>>) -> true;
 is_bot(_) -> false.
 
 bot_name(N, Names) when is_list(Names), N =< length(Names) ->
-    Name = lists:nth(N, Names),
-    <<"bot_", Name/binary>>;
+    case lists:nth(N, Names) of
+        Name when is_binary(Name) -> <<"bot_", Name/binary>>;
+        _ -> <<"bot_", (integer_to_binary(N))/binary>>
+    end;
 bot_name(N, _) ->
     <<"bot_", (integer_to_binary(N))/binary>>.
 
