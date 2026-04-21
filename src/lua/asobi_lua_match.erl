@@ -61,7 +61,12 @@ init(Config) ->
             {EncConfig, LuaSt1} = luerl:encode(GameConfig, LuaSt0a),
             case asobi_lua_loader:call(init, [EncConfig], LuaSt1) of
                 {ok, [GameState | _], LuaSt2} ->
-                    {ok, #{lua_state => LuaSt2, game_state => GameState, script => ScriptPath}};
+                    {ok, #{
+                        lua_state => LuaSt2,
+                        game_state => GameState,
+                        script => ScriptPath,
+                        script_mtime => filelib:last_modified(ScriptPath)
+                    }};
                 {ok, [], _} ->
                     %% asobi_match:init/1 doesn't allow an error return; log and
                     %% crash so the supervisor handles it with full context.
@@ -121,7 +126,8 @@ handle_input(PlayerId, Input, #{lua_state := LuaSt, game_state := GS} = State) -
     end.
 
 -spec tick(map()) -> {ok, map()} | {finished, map(), map()}.
-tick(#{lua_state := LuaSt, game_state := GS} = State) ->
+tick(State0) ->
+    #{lua_state := LuaSt, game_state := GS} = State = maybe_hot_reload(State0),
     case asobi_lua_loader:call(tick, [GS], LuaSt, ?TICK_TIMEOUT) of
         {ok, [GS1 | _], LuaSt1} ->
             case is_finished(GS1, LuaSt1) of
@@ -190,6 +196,66 @@ is_finished(GS, LuaSt) ->
         end
     catch
         _:_ -> false
+    end.
+
+%% --- Hot reload ---
+%%
+%% Called at the start of every tick. If the match's source .lua file on
+%% disk has been modified since the last check, re-execute the script body
+%% against the current Luerl state. This re-declares globals and functions
+%% in place — `cube_color = "#4facfe"` at the top of match.lua updates the
+%% live global, and the next call to `get_state/2` sees the new value.
+%%
+%% Design notes:
+%% - Lua-side match state (players, tick counters, etc.) lives inside the
+%%   Luerl state so re-running the script preserves it — the script body
+%%   only reassigns globals and redefines functions, it doesn't touch
+%%   previously-set local variables or table fields unless you explicitly
+%%   re-run `init()`.
+%% - Erlang-side match state (#{game_state, ...}) is untouched.
+%% - If the new script has a syntax error, we log a warning, remember the
+%%   new mtime (so we don't keep retrying), and keep running the old code
+%%   until the file is fixed.
+-spec maybe_hot_reload(map()) -> map().
+maybe_hot_reload(#{script := Path, script_mtime := OldMtime, lua_state := LuaSt} = State) ->
+    case filelib:last_modified(Path) of
+        0 ->
+            State;
+        OldMtime ->
+            State;
+        NewMtime ->
+            case reload_script(Path, LuaSt) of
+                {ok, NewLuaSt} ->
+                    logger:notice(#{
+                        msg => ~"lua hot reload", script => Path, mtime => NewMtime
+                    }),
+                    State#{lua_state => NewLuaSt, script_mtime => NewMtime};
+                {error, Reason} ->
+                    logger:warning(#{
+                        msg => ~"lua hot reload failed",
+                        script => Path,
+                        reason => Reason
+                    }),
+                    State#{script_mtime => NewMtime}
+            end
+    end;
+maybe_hot_reload(State) ->
+    %% Legacy state from a match created before hot-reload shipped — skip.
+    State.
+
+-spec reload_script(file:filename_all(), term()) -> {ok, term()} | {error, term()}.
+reload_script(Path, LuaSt) ->
+    case file:read_file(Path) of
+        {ok, Code} ->
+            try luerl:do(binary_to_list(Code), LuaSt) of
+                {ok, _Results, NewLuaSt} -> {ok, NewLuaSt};
+                {error, Errors, _} -> {error, {lua_error, Errors}};
+                Other -> {error, {unexpected, Other}}
+            catch
+                Class:CaughtReason -> {error, {Class, CaughtReason}}
+            end;
+        {error, FileReason} ->
+            {error, {file_error, FileReason}}
     end.
 
 decode_to_map(Term, LuaSt) ->
