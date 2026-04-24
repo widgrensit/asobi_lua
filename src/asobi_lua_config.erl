@@ -30,14 +30,19 @@ match_size   = 4                          -- required, positive integer
 max_players  = 10                         -- optional, defaults to match_size
 strategy     = "fill"                     -- optional, "fill" | "skill_based"
 bots         = { script = "bots/ai.lua" } -- optional
+game_type    = "world"                    -- optional, "match" (default) or "world"
 
--- World mode config (large session games):
+-- World mode config (large session games, game_type = "world"):
 lazy_zones              = true            -- optional, on-demand zone loading
 zone_idle_timeout       = 30000           -- optional, ms before idle zone is reaped
 max_active_zones        = 10000           -- optional, cap on concurrent zones
 spatial_grid_cell_size  = 64              -- optional, cell size for spatial grid indexing
 cold_tick_divisor       = 10              -- optional, tick rate divisor for cold (unoccupied) zones
 ```
+
+Setting `game_type = "world"` routes the script through the `asobi_lua_world`
+bridge (zone_tick/2 + handle_input/3 returning entities). Defaults to "match",
+which uses the `asobi_lua_match` bridge (tick/1 + wrapped-state callbacks).
 
 Bot scripts can export a `names` list that the platform reads after loading:
 
@@ -133,6 +138,7 @@ read_match_globals(ScriptPath, St) ->
     MaxPlayers = read_global_int(~"max_players", St),
     Strategy = read_global_string(~"strategy", St),
     Bots = read_global_table(~"bots", St),
+    GameType = read_global_string(~"game_type", St),
     LazyZones = read_global_bool(~"lazy_zones", St),
     ZoneIdleTimeout = read_global_int(~"zone_idle_timeout", St),
     MaxActiveZones = read_global_int(~"max_active_zones", St),
@@ -151,15 +157,21 @@ read_match_globals(ScriptPath, St) ->
                         _ -> N
                     end
             },
-            Config1 = maybe_add_strategy(Config0, Strategy),
-            Config2 = maybe_add_bots(Config1, Bots, ScriptPath),
-            Config3 = maybe_add_zone_config(Config2, LazyZones, ZoneIdleTimeout, MaxActiveZones),
-            Config4 = maybe_add_int(Config3, spatial_grid_cell_size, SpatialGridCellSize),
-            Config5 = maybe_add_int(Config4, cold_tick_divisor, ColdTickDivisor),
-            {ok, Config5};
+            Config1 = maybe_add_game_type(Config0, GameType),
+            Config2 = maybe_add_strategy(Config1, Strategy),
+            Config3 = maybe_add_bots(Config2, Bots, ScriptPath),
+            Config4 = maybe_add_zone_config(Config3, LazyZones, ZoneIdleTimeout, MaxActiveZones),
+            Config5 = maybe_add_int(Config4, spatial_grid_cell_size, SpatialGridCellSize),
+            Config6 = maybe_add_int(Config5, cold_tick_divisor, ColdTickDivisor),
+            {ok, Config6};
         _ ->
             {error, {ScriptPath, ~"match_size must be a positive integer"}}
     end.
+
+maybe_add_game_type(Config, ~"world") ->
+    Config#{type => world};
+maybe_add_game_type(Config, _) ->
+    Config.
 
 maybe_add_strategy(Config, undefined) ->
     Config;

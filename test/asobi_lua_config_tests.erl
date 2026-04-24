@@ -35,7 +35,9 @@ config_test_() ->
             {"bot names: reads from bot script", fun bot_names_from_script/0},
             {"bot names: falls back to defaults", fun bot_names_fallback/0},
             {"world config: reads zone settings", fun world_config_zone_settings/0},
-            {"world config: reads phase 2 settings", fun world_config_phase2_settings/0}
+            {"world config: reads phase 2 settings", fun world_config_phase2_settings/0},
+            {"game_type world selects world bridge", fun game_type_world_selects_world_bridge/0},
+            {"game_type absent defaults to match bridge", fun game_type_absent_defaults_to_match/0}
         ]}.
 
 single_mode_loads_globals() ->
@@ -144,6 +146,32 @@ world_config_phase2_settings() ->
     ?assertEqual(64, maps:get(spatial_grid_cell_size, Mode)),
     ?assertEqual(5, maps:get(cold_tick_divisor, Mode)),
     ?assertEqual(true, maps:get(lazy_zones, Mode)),
+    cleanup_temp_dir(TmpDir).
+
+game_type_world_selects_world_bridge() ->
+    TmpDir = make_temp_dir(),
+    {ok, Content} = file:read_file(fixture("config_game_type_world.lua")),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), Content),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Modes = get_game_modes(),
+    Mode = maps:get(~"default", Modes),
+    ?assertEqual(world, maps:get(type, Mode)),
+    {ok, GameMod, _} = asobi_game_modes:resolve_game_module(~"default"),
+    ?assertEqual(asobi_lua_world, GameMod),
+    cleanup_temp_dir(TmpDir).
+
+game_type_absent_defaults_to_match() ->
+    TmpDir = make_temp_dir(),
+    {ok, Content} = file:read_file(fixture("config_minimal.lua")),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), Content),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Modes = get_game_modes(),
+    Mode = maps:get(~"default", Modes),
+    ?assertEqual(false, maps:is_key(type, Mode)),
+    {ok, GameMod, _} = asobi_game_modes:resolve_game_module(~"default"),
+    ?assertEqual(asobi_lua_match, GameMod),
     cleanup_temp_dir(TmpDir).
 
 %% --- Helpers ---
