@@ -40,3 +40,34 @@ generate_world_missing_script_returns_empty_test() ->
 generate_world_bad_script_returns_empty_test() ->
     Config = #{game_config => #{lua_script => "/nonexistent/path.lua"}},
     ?assertEqual({ok, #{}}, asobi_lua_world:generate_world(0, Config)).
+
+handle_input_uses_zone_state_from_proc_dict_test() ->
+    %% asobi_zone passes just the entities map to handle_input/3 (no lua_state).
+    %% The bridge must recover lua_state from the zone's proc dict, which
+    %% zone_tick populates. Verify the full flow end-to-end.
+    Script = fixture("config_move_world.lua"),
+    Config = #{game_config => #{lua_script => Script}},
+    {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+    ?assert(maps:is_key({0, 0}, ZoneStates)),
+    ZoneState = maps:get({0, 0}, ZoneStates),
+
+    %% First zone_tick primes the proc dict.
+    erlang:erase({asobi_lua_world, zone_state}),
+    {_Ents, ZoneState1} = asobi_lua_world:zone_tick(#{}, ZoneState),
+    ?assertMatch(#{lua_state := _}, erlang:get({asobi_lua_world, zone_state})),
+
+    %% A move input should invoke Lua's handle_input and return updated entities.
+    Input = #{~"kind" => ~"move", ~"x" => 42, ~"y" => 7},
+    {ok, Entities1} = asobi_lua_world:handle_input(~"p1", Input, #{}),
+    ?assertMatch(#{~"p1" := #{~"x" := 42, ~"y" := 7}}, Entities1),
+
+    %% Follow-up tick sees the handle_input lua_state changes (no crash).
+    {_, _ZoneState2} = asobi_lua_world:zone_tick(Entities1, ZoneState1),
+    erlang:erase({asobi_lua_world, zone_state}).
+
+handle_input_without_stash_is_noop_test() ->
+    erlang:erase({asobi_lua_world, zone_state}),
+    ?assertEqual(
+        {ok, #{a => 1}},
+        asobi_lua_world:handle_input(~"p1", #{~"kind" => ~"move"}, #{a => 1})
+    ).
