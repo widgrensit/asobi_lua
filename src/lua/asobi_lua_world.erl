@@ -173,7 +173,40 @@ generate_world(Seed, #{lua_state := LuaSt} = _Config) ->
             {ok, decode_zone_states(ZoneStates, LuaSt1)};
         {error, _} ->
             {ok, #{}}
+    end;
+generate_world(Seed, Config) when is_map(Config) ->
+    %% Called by asobi_world_server before init/1 has run, so no lua_state is
+    %% threaded through. Build a fresh luerl state to ask the script for zone
+    %% coords, then give each returned zone its own luerl state so subsequent
+    %% zone_tick/handle_input calls can invoke Lua callbacks.
+    GameConfig = maps:get(game_config, Config, #{}),
+    case maps:get(lua_script, GameConfig, undefined) of
+        undefined ->
+            {ok, #{}};
+        ScriptPath ->
+            case asobi_lua_loader:new(ScriptPath) of
+                {ok, LuaSt} ->
+                    {ok, ZoneStates} = generate_world(Seed, #{lua_state => LuaSt}),
+                    {ok, inject_per_zone_lua(ZoneStates, ScriptPath)};
+                {error, _} ->
+                    {ok, #{}}
+            end
     end.
+
+-spec inject_per_zone_lua(map(), file:filename_all()) -> map().
+inject_per_zone_lua(ZoneStates, ScriptPath) ->
+    maps:map(
+        fun
+            (_Coords, ZoneState) when is_map(ZoneState) ->
+                case asobi_lua_loader:new(ScriptPath) of
+                    {ok, LuaSt} -> ZoneState#{lua_state => LuaSt};
+                    {error, _} -> ZoneState
+                end;
+            (_Coords, Other) ->
+                Other
+        end,
+        ZoneStates
+    ).
 
 -spec get_state(binary(), map()) -> map().
 get_state(PlayerId, #{lua_state := LuaSt, game_state := GS}) ->
