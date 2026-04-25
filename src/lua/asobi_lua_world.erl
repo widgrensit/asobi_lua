@@ -112,37 +112,70 @@ spawn_position(PlayerId, #{lua_state := LuaSt, game_state := GS}) ->
             {ok, {0.0, 0.0}}
     end.
 
+%% asobi_zone calls apply_inputs (handle_input/3) *before* zone_tick/2 each
+%% tick, and the only state it carries is the entities map — no lua_state
+%% threaded through. We bridge that by stashing the current ZoneState in the
+%% zone process's dictionary from zone_tick, and reading it back in
+%% handle_input. Both run inside the same zone gen_server process so the
+%% proc dict is safe and per-zone-isolated.
+-define(PD_KEY, {?MODULE, zone_state}).
+
 -spec zone_tick(map(), term()) -> {map(), term()}.
-zone_tick(Entities, ZoneState) when is_map(ZoneState), is_map_key(lua_state, ZoneState) ->
-    LuaSt = maps:get(lua_state, ZoneState),
-    {EncEntities, LuaSt1} = luerl:encode(Entities, LuaSt),
-    GS = maps:get(game_state, ZoneState, nil),
-    case asobi_lua_loader:call(zone_tick, [EncEntities, GS], LuaSt1, ?TICK_TIMEOUT) of
-        {ok, [Ents1, ZS1 | _], LuaSt2} ->
-            DecodedEnts = decode_to_map(Ents1, LuaSt2),
-            {DecodedEnts, ZoneState#{lua_state => LuaSt2, game_state => ZS1}};
-        {ok, [Ents1 | _], LuaSt2} ->
-            DecodedEnts = decode_to_map(Ents1, LuaSt2),
-            {DecodedEnts, ZoneState#{lua_state => LuaSt2}};
-        {error, _} ->
-            {Entities, ZoneState}
-    end;
+zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
+    %% Pick up any lua_state updates that handle_input stashed earlier this tick.
+    ZoneState =
+        case erlang:get(?PD_KEY) of
+            #{lua_state := LuaFromDict} -> ZoneState0#{lua_state => LuaFromDict};
+            _ -> ZoneState0
+        end,
+    Result =
+        case maps:get(lua_state, ZoneState, undefined) of
+            undefined ->
+                {Entities, ZoneState};
+            LuaSt ->
+                {EncEntities, LuaSt1} = luerl:encode(Entities, LuaSt),
+                GS = maps:get(game_state, ZoneState, nil),
+                case
+                    asobi_lua_loader:call(
+                        zone_tick, [EncEntities, GS], LuaSt1, ?TICK_TIMEOUT
+                    )
+                of
+                    {ok, [Ents1, ZS1 | _], LuaSt2} ->
+                        {decode_to_map(Ents1, LuaSt2), ZoneState#{
+                            lua_state => LuaSt2, game_state => ZS1
+                        }};
+                    {ok, [Ents1 | _], LuaSt2} ->
+                        {decode_to_map(Ents1, LuaSt2), ZoneState#{lua_state => LuaSt2}};
+                    {error, _} ->
+                        {Entities, ZoneState}
+                end
+        end,
+    {_, NewZoneState} = Result,
+    erlang:put(?PD_KEY, NewZoneState),
+    Result;
 zone_tick(Entities, ZoneState) ->
     {Entities, ZoneState}.
 
 -spec handle_input(binary(), map(), map()) -> {ok, map()} | {error, term()}.
-handle_input(PlayerId, Input, Entities) when is_map(Entities), is_map_key(lua_state, Entities) ->
-    LuaSt = maps:get(lua_state, Entities),
-    {EncInput, LuaSt1} = luerl:encode(Input, LuaSt),
-    {EncEntities, LuaSt2} = luerl:encode(maps:without([lua_state], Entities), LuaSt1),
-    case asobi_lua_loader:call(handle_input, [PlayerId, EncInput, EncEntities], LuaSt2) of
-        {ok, [Ents1 | _], LuaSt3} ->
-            {ok, decode_to_map(Ents1, LuaSt3)};
-        {error, _} ->
+handle_input(PlayerId, Input, Entities) ->
+    case erlang:get(?PD_KEY) of
+        #{lua_state := LuaSt} = ZoneState ->
+            {EncInput, LuaSt1} = luerl:encode(Input, LuaSt),
+            {EncEntities, LuaSt2} = luerl:encode(Entities, LuaSt1),
+            case
+                asobi_lua_loader:call(
+                    handle_input, [PlayerId, EncInput, EncEntities], LuaSt2
+                )
+            of
+                {ok, [Ents1 | _], LuaSt3} ->
+                    erlang:put(?PD_KEY, ZoneState#{lua_state => LuaSt3}),
+                    {ok, decode_to_map(Ents1, LuaSt3)};
+                {error, _} ->
+                    {ok, Entities}
+            end;
+        _ ->
             {ok, Entities}
-    end;
-handle_input(_PlayerId, _Input, Entities) ->
-    {ok, Entities}.
+    end.
 
 -spec post_tick(non_neg_integer(), map()) ->
     {ok, map()} | {vote, map(), map()} | {finished, map(), map()}.
@@ -173,7 +206,40 @@ generate_world(Seed, #{lua_state := LuaSt} = _Config) ->
             {ok, decode_zone_states(ZoneStates, LuaSt1)};
         {error, _} ->
             {ok, #{}}
+    end;
+generate_world(Seed, Config) when is_map(Config) ->
+    %% Called by asobi_world_server before init/1 has run, so no lua_state is
+    %% threaded through. Build a fresh luerl state to ask the script for zone
+    %% coords, then give each returned zone its own luerl state so subsequent
+    %% zone_tick/handle_input calls can invoke Lua callbacks.
+    GameConfig = maps:get(game_config, Config, #{}),
+    case maps:get(lua_script, GameConfig, undefined) of
+        undefined ->
+            {ok, #{}};
+        ScriptPath ->
+            case asobi_lua_loader:new(ScriptPath) of
+                {ok, LuaSt} ->
+                    {ok, ZoneStates} = generate_world(Seed, #{lua_state => LuaSt}),
+                    {ok, inject_per_zone_lua(ZoneStates, ScriptPath)};
+                {error, _} ->
+                    {ok, #{}}
+            end
     end.
+
+-spec inject_per_zone_lua(map(), file:filename_all()) -> map().
+inject_per_zone_lua(ZoneStates, ScriptPath) ->
+    maps:map(
+        fun
+            (_Coords, ZoneState) when is_map(ZoneState) ->
+                case asobi_lua_loader:new(ScriptPath) of
+                    {ok, LuaSt} -> ZoneState#{lua_state => LuaSt};
+                    {error, _} -> ZoneState
+                end;
+            (_Coords, Other) ->
+                Other
+        end,
+        ZoneStates
+    ).
 
 -spec get_state(binary(), map()) -> map().
 get_state(PlayerId, #{lua_state := LuaSt, game_state := GS}) ->
