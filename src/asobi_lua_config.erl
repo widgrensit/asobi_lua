@@ -144,6 +144,7 @@ read_match_globals(ScriptPath, St) ->
     MaxActiveZones = read_global_int(~"max_active_zones", St),
     SpatialGridCellSize = read_global_int(~"spatial_grid_cell_size", St),
     ColdTickDivisor = read_global_int(~"cold_tick_divisor", St),
+    EmptyGraceMs = read_global_int(~"empty_grace_ms", St),
     case MatchSize of
         undefined ->
             {error, {ScriptPath, ~"match_size global is required"}};
@@ -163,7 +164,8 @@ read_match_globals(ScriptPath, St) ->
             Config4 = maybe_add_zone_config(Config3, LazyZones, ZoneIdleTimeout, MaxActiveZones),
             Config5 = maybe_add_int(Config4, spatial_grid_cell_size, SpatialGridCellSize),
             Config6 = maybe_add_int(Config5, cold_tick_divisor, ColdTickDivisor),
-            {ok, Config6};
+            Config7 = maybe_add_int(Config6, empty_grace_ms, EmptyGraceMs),
+            {ok, Config7};
         _ ->
             {error, {ScriptPath, ~"match_size must be a positive integer"}}
     end.

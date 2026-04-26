@@ -98,17 +98,19 @@ leave(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
     case asobi_lua_loader:call(leave, [PlayerId, GS], LuaSt) of
         {ok, [GS1 | _], LuaSt1} ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
-        {error, _} ->
+        {error, Reason} ->
+            log_lua_error(leave, Reason, State),
             {ok, State}
     end.
 
 -spec spawn_position(binary(), map()) -> {ok, {number(), number()}}.
-spawn_position(PlayerId, #{lua_state := LuaSt, game_state := GS}) ->
+spawn_position(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
     case asobi_lua_loader:call(spawn_position, [PlayerId, GS], LuaSt) of
         {ok, [PosTable | _], LuaSt1} ->
             Pos = decode_position(PosTable, LuaSt1),
             {ok, Pos};
-        {error, _} ->
+        {error, Reason} ->
+            log_lua_error(spawn_position, Reason, State),
             {ok, {0.0, 0.0}}
     end.
 
@@ -146,7 +148,8 @@ zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
                         }};
                     {ok, [Ents1 | _], LuaSt2} ->
                         {decode_to_map(Ents1, LuaSt2), ZoneState#{lua_state => LuaSt2}};
-                    {error, _} ->
+                    {error, Reason} ->
+                        log_lua_error(zone_tick, Reason, ZoneState),
                         {Entities, ZoneState}
                 end
         end,
@@ -170,7 +173,8 @@ handle_input(PlayerId, Input, Entities) ->
                 {ok, [Ents1 | _], LuaSt3} ->
                     erlang:put(?PD_KEY, ZoneState#{lua_state => LuaSt3}),
                     {ok, decode_to_map(Ents1, LuaSt3)};
-                {error, _} ->
+                {error, Reason} ->
+                    log_lua_error(handle_input, Reason, ZoneState),
                     {ok, Entities}
             end;
         _ ->
@@ -191,11 +195,8 @@ post_tick(TickN, #{lua_state := LuaSt, game_state := GS} = State) ->
                 {finished, Result} ->
                     {finished, Result, State1}
             end;
-        {error, timeout} ->
-            logger:error(#{msg => ~"lua post_tick timeout", script => maps:get(script, State)}),
-            {ok, State};
         {error, Reason} ->
-            logger:error(#{msg => ~"lua post_tick error", reason => Reason}),
+            log_lua_error(post_tick, Reason, State),
             {ok, State}
     end.
 
@@ -221,7 +222,13 @@ generate_world(Seed, Config) when is_map(Config) ->
                 {ok, LuaSt} ->
                     {ok, ZoneStates} = generate_world(Seed, #{lua_state => LuaSt}),
                     {ok, inject_per_zone_lua(ZoneStates, ScriptPath)};
-                {error, _} ->
+                {error, Reason} ->
+                    logger:error(#{
+                        msg =>
+                            ~"asobi_lua_world generate_world: lua_loader:new failed; world will spawn with empty zones",
+                        script => ScriptPath,
+                        reason => Reason
+                    }),
                     {ok, #{}}
             end
     end.
@@ -376,6 +383,25 @@ decode_terrain_provider(Result, LuaSt) ->
             none
     end.
 
+%% Logs Lua callback failures uniformly. Pre-fix, leave/spawn_position/
+%% zone_tick/handle_input swallowed errors silently and only post_tick logged
+%% — so a broken Lua script could degrade gameplay invisibly. State is either
+%% the world State (carries `script`) or a per-zone ZoneState (may not).
+log_lua_error(Callback, Reason, StateOrZoneState) ->
+    Script = maps:get(script, StateOrZoneState, ~"<unknown>"),
+    Severity =
+        case Reason of
+            timeout -> ~"timeout";
+            _ -> ~"error"
+        end,
+    logger:warning(#{
+        msg => ~"lua callback failed",
+        callback => Callback,
+        severity => Severity,
+        script => Script,
+        reason => Reason
+    }).
+
 decode_position(PosTable, LuaSt) ->
     case luerl:decode(PosTable, LuaSt) of
         Decoded when is_list(Decoded) ->
@@ -451,9 +477,26 @@ decode_phases(PhasesRef, LuaSt) ->
                 end,
                 Decoded
             );
-        _ ->
+        Other ->
+            %% Lua phases() returned a non-list — likely a script bug. Logging the
+            %% type helps the developer notice it; without this, decode silently
+            %% returned [], the world server treated it as "no phases", and the
+            %% mismatch only surfaced as runtime weirdness much later.
+            logger:warning(#{
+                msg => ~"asobi_lua_world: phases() returned non-list, ignoring",
+                got_type => type_of(Other)
+            }),
             []
     end.
+
+type_of(V) when is_list(V) -> ~"list";
+type_of(V) when is_map(V) -> ~"map";
+type_of(V) when is_binary(V) -> ~"binary";
+type_of(V) when is_integer(V) -> ~"integer";
+type_of(V) when is_float(V) -> ~"float";
+type_of(V) when is_atom(V) -> ~"atom";
+type_of(V) when is_tuple(V) -> ~"tuple";
+type_of(_) -> ~"unknown".
 
 decode_phase_start(~"prev_ended") ->
     prev_ended;
