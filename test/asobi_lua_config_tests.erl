@@ -38,7 +38,14 @@ config_test_() ->
             {"world config: reads phase 2 settings", fun world_config_phase2_settings/0},
             {"game_type world selects world bridge", fun game_type_world_selects_world_bridge/0},
             {"game_type absent defaults to match bridge", fun game_type_absent_defaults_to_match/0},
-            {"empty_grace_ms global is forwarded to mode config", fun empty_grace_ms_forwarded/0}
+            {"empty_grace_ms global is forwarded to mode config", fun empty_grace_ms_forwarded/0},
+            {"player_ttl_ms positive is forwarded", fun player_ttl_ms_positive_forwarded/0},
+            {"player_ttl_ms = -1 is forwarded (persistent world opt-in)",
+                fun player_ttl_ms_minus_one_forwarded/0},
+            {"player_ttl_ms = 0 is forwarded (explicit immediate cleanup)",
+                fun player_ttl_ms_zero_forwarded/0},
+            {"player_ttl_ms absent: key omitted from mode config",
+                fun player_ttl_ms_absent_omitted/0}
         ]}.
 
 single_mode_loads_globals() ->
@@ -184,6 +191,46 @@ empty_grace_ms_forwarded() ->
     Modes = get_game_modes(),
     Mode = maps:get(~"default", Modes),
     ?assertEqual(30000, maps:get(empty_grace_ms, Mode)),
+    cleanup_temp_dir(TmpDir).
+
+player_ttl_ms_positive_forwarded() ->
+    TmpDir = make_temp_dir(),
+    {ok, Content} = file:read_file(fixture("config_player_ttl.lua")),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), Content),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Mode = maps:get(~"default", get_game_modes()),
+    ?assertEqual(5000, maps:get(player_ttl_ms, Mode)),
+    cleanup_temp_dir(TmpDir).
+
+player_ttl_ms_minus_one_forwarded() ->
+    TmpDir = make_temp_dir(),
+    Content = ~"match_size = 1\nplayer_ttl_ms = -1\n",
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), Content),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Mode = maps:get(~"default", get_game_modes()),
+    ?assertEqual(-1, maps:get(player_ttl_ms, Mode)),
+    cleanup_temp_dir(TmpDir).
+
+player_ttl_ms_zero_forwarded() ->
+    TmpDir = make_temp_dir(),
+    Content = ~"match_size = 1\nplayer_ttl_ms = 0\n",
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), Content),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Mode = maps:get(~"default", get_game_modes()),
+    ?assertEqual(0, maps:get(player_ttl_ms, Mode)),
+    cleanup_temp_dir(TmpDir).
+
+player_ttl_ms_absent_omitted() ->
+    TmpDir = make_temp_dir(),
+    {ok, Content} = file:read_file(fixture("config_minimal.lua")),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), Content),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Mode = maps:get(~"default", get_game_modes()),
+    ?assertEqual(false, maps:is_key(player_ttl_ms, Mode)),
     cleanup_temp_dir(TmpDir).
 
 %% --- Helpers ---
