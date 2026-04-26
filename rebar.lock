@@ -1,7 +1,7 @@
 {"1.2.0",
 [{<<"asobi">>,
   {git,"https://github.com/widgrensit/asobi.git",
-       {ref,"ba39b3b9ef87bf421a7d91dbc2308de3fe71f472"}},
+       {ref,"342a5b8c2fe6c72e10e9caeeefcfd5dd36642cb2"}},
   0},
  {<<"backoff">>,{pkg,<<"backoff">>,<<"1.1.6">>},3},
  {<<"cowboy">>,{pkg,<<"cowboy">>,<<"2.13.0">>},2},
