@@ -37,7 +37,8 @@ config_test_() ->
             {"world config: reads zone settings", fun world_config_zone_settings/0},
             {"world config: reads phase 2 settings", fun world_config_phase2_settings/0},
             {"game_type world selects world bridge", fun game_type_world_selects_world_bridge/0},
-            {"game_type absent defaults to match bridge", fun game_type_absent_defaults_to_match/0}
+            {"game_type absent defaults to match bridge", fun game_type_absent_defaults_to_match/0},
+            {"empty_grace_ms global is forwarded to mode config", fun empty_grace_ms_forwarded/0}
         ]}.
 
 single_mode_loads_globals() ->
@@ -172,6 +173,17 @@ game_type_absent_defaults_to_match() ->
     ?assertEqual(false, maps:is_key(type, Mode)),
     {ok, GameMod, _} = asobi_game_modes:resolve_game_module(~"default"),
     ?assertEqual(asobi_lua_match, GameMod),
+    cleanup_temp_dir(TmpDir).
+
+empty_grace_ms_forwarded() ->
+    TmpDir = make_temp_dir(),
+    {ok, Content} = file:read_file(fixture("config_grace.lua")),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), Content),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Modes = get_game_modes(),
+    Mode = maps:get(~"default", Modes),
+    ?assertEqual(30000, maps:get(empty_grace_ms, Mode)),
     cleanup_temp_dir(TmpDir).
 
 %% --- Helpers ---
