@@ -38,6 +38,8 @@ zone_idle_timeout       = 30000           -- optional, ms before idle zone is re
 max_active_zones        = 10000           -- optional, cap on concurrent zones
 spatial_grid_cell_size  = 64              -- optional, cell size for spatial grid indexing
 cold_tick_divisor       = 10              -- optional, tick rate divisor for cold (unoccupied) zones
+empty_grace_ms          = 60000           -- optional, ms to keep an empty world alive before finishing
+player_ttl_ms           = 0               -- optional, 0=remove on disconnect, -1=keep forever, N=grace ms
 ```
 
 Setting `game_type = "world"` routes the script through the `asobi_lua_world`
@@ -145,6 +147,7 @@ read_match_globals(ScriptPath, St) ->
     SpatialGridCellSize = read_global_int(~"spatial_grid_cell_size", St),
     ColdTickDivisor = read_global_int(~"cold_tick_divisor", St),
     EmptyGraceMs = read_global_int(~"empty_grace_ms", St),
+    PlayerTtlMs = read_global_int(~"player_ttl_ms", St),
     case MatchSize of
         undefined ->
             {error, {ScriptPath, ~"match_size global is required"}};
@@ -165,7 +168,8 @@ read_match_globals(ScriptPath, St) ->
             Config5 = maybe_add_int(Config4, spatial_grid_cell_size, SpatialGridCellSize),
             Config6 = maybe_add_int(Config5, cold_tick_divisor, ColdTickDivisor),
             Config7 = maybe_add_int(Config6, empty_grace_ms, EmptyGraceMs),
-            {ok, Config7};
+            Config8 = maybe_add_player_ttl(Config7, PlayerTtlMs),
+            {ok, Config8};
         _ ->
             {error, {ScriptPath, ~"match_size must be a positive integer"}}
     end.
@@ -207,6 +211,13 @@ maybe_add_int(Config, Key, Val) when is_integer(Val), Val > 0 ->
     Config#{Key => Val};
 maybe_add_int(Config, _Key, _Val) ->
     Config.
+
+%% player_ttl_ms accepts 0 (remove on disconnect, default), -1 (keep forever),
+%% or a positive grace window in ms. Any integer is a valid override.
+maybe_add_player_ttl(Config, undefined) ->
+    Config;
+maybe_add_player_ttl(Config, Val) when is_integer(Val) ->
+    Config#{player_ttl_ms => Val}.
 
 maybe_add_bots(Config, undefined, _ScriptPath) ->
     Config;
