@@ -71,3 +71,38 @@ handle_input_without_stash_is_noop_test() ->
         {ok, #{a => 1}},
         asobi_lua_world:handle_input(~"p1", #{~"kind" => ~"move"}, #{a => 1})
     ).
+
+%% Regression: an empty Lua table returned from zone_tick/handle_input must
+%% decode to #{} (not []). Luerl can't distinguish empty array from empty map,
+%% so the bridge must coerce at the named map boundary. asobi_zone:compute_deltas
+%% folds over entities with maps:fold/3 and crashes with {badmap,[]} otherwise.
+zone_tick_returns_empty_map_not_list_test() ->
+    Script = fixture("config_move_world.lua"),
+    Config = #{game_config => #{lua_script => Script}},
+    {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+    ZoneState = maps:get({0, 0}, ZoneStates),
+
+    erlang:erase({asobi_lua_world, zone_state}),
+    {Entities, _ZoneState1} = asobi_lua_world:zone_tick(#{}, ZoneState),
+    ?assert(is_map(Entities)),
+    ?assertEqual(#{}, Entities),
+    erlang:erase({asobi_lua_world, zone_state}).
+
+handle_input_returns_empty_map_not_list_test() ->
+    Script = fixture("config_move_world.lua"),
+    Config = #{game_config => #{lua_script => Script}},
+    {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+    ZoneState = maps:get({0, 0}, ZoneStates),
+
+    erlang:erase({asobi_lua_world, zone_state}),
+    %% Prime the proc dict so handle_input has a lua_state to call into.
+    {_, _} = asobi_lua_world:zone_tick(#{}, ZoneState),
+
+    %% A non-"move" input is a no-op in the fixture: it returns the entities
+    %% argument unchanged. If we pass #{}, we must get back #{}, not [].
+    {ok, Entities} = asobi_lua_world:handle_input(
+        ~"p1", #{~"kind" => ~"ping"}, #{}
+    ),
+    ?assert(is_map(Entities)),
+    ?assertEqual(#{}, Entities),
+    erlang:erase({asobi_lua_world, zone_state}).

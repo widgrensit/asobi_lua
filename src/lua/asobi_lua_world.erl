@@ -537,7 +537,10 @@ parse_coords(Bin) ->
     end.
 
 decode_to_map(Term, LuaSt) ->
-    deep_decode(luerl:decode(Term, LuaSt)).
+    case deep_decode(luerl:decode(Term, LuaSt)) of
+        [] -> #{};
+        Decoded -> Decoded
+    end.
 
 deep_decode([{K, _} | _] = PropList) when is_binary(K) ->
     maps:from_list(deep_decode_pairs(PropList));
