@@ -15,7 +15,7 @@
 %% proc dict (e.g. if zone_tick forgets to put/1, or handle_input forgets
 %% to put/1 after a Lua call) would shrink to the minimal counterexample.
 
--define(NUMTESTS, 25).
+-define(NUMTESTS, list_to_integer(os:getenv("PROPER_NUMTESTS", "25"))).
 -define(PD_KEY, {asobi_lua_world, zone_state}).
 
 bridge_input_threading_test_() ->
