@@ -64,6 +64,7 @@ game.terrain.preload(coords_list)                -- preload chunks async
 """.
 
 -export([install/2]).
+-export([deep_decode/1, decode_to_map/2]).
 
 -spec install(map(), dynamic()) -> dynamic().
 install(Ctx, St0) ->
@@ -681,6 +682,18 @@ wrap_result({error, Reason}, St) -> error_result(Reason, St).
 decode_args(Args, St) ->
     [deep_decode(luerl:decode(A, St)) || A <- Args].
 
+%% Recursively turn a Luerl-decoded term into native Erlang terms.
+%%
+%% Luerl's `decode/2` returns Lua tables as proplists keyed by binaries
+%% (string keys) or integers (sequential keys). Mixed-key tables come
+%% back as a single proplist; nested tables are still proplists. This
+%% function picks the right Erlang shape based on the proplist's key
+%% type — string keys → map, integer keys → ordered list (re-sorted by
+%% the Lua index because Luerl does not promise key order) — and
+%% recurses into every value so the result is fully native.
+%%
+%% Defensive: `ensure_pairs/1` filters out non-`{K, V}` entries silently
+%% so a malformed Lua return won't crash the caller.
 -spec deep_decode(term()) -> term().
 deep_decode([{K, _} | _] = PropList) when is_binary(K) ->
     maps:from_list([{Key, deep_decode(Val)} || {Key, Val} <- ensure_pairs(PropList)]);
@@ -692,6 +705,10 @@ deep_decode(L) when is_list(L) ->
     [deep_decode(E) || E <- L];
 deep_decode(V) ->
     V.
+
+-spec decode_to_map(term(), dynamic()) -> term().
+decode_to_map(Term, LuaSt) ->
+    deep_decode(luerl:decode(Term, LuaSt)).
 
 %% --- Leaderboard encoding ---
 

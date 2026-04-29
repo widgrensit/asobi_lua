@@ -163,9 +163,15 @@ stay connected, state is preserved.
 ```
 
 Every match and world runs as its own BEAM process under a supervisor.
-Luerl executes your Lua inside the BEAM — no sub-process, no sandbox escape,
-no GC pauses. Hot reload swaps the Luerl module while match state stays in
-the process heap.
+Luerl executes your Lua inside the BEAM — no sub-process, no GC pauses. The
+script runs in a hardened state with `os.execute`, `os.exit`, `dofile`,
+`loadfile`, `load`, `loadstring`, `io`, and `package` removed; `require/1`
+is replaced by an asobi_lua-controlled implementation that resolves names
+relative to your `/app/game` directory and rejects `..` traversal. Every
+callback runs under a wall-clock timeout so a runaway script can't wedge
+the match loop. See [SECURITY.md](SECURITY.md#sandbox-model) for the full
+sandbox contract. Hot reload swaps the Luerl module while match state stays
+in the process heap.
 
 > [!NOTE]
 > asobi_lua is pre-1.0. The API is stabilising; expect minor breaking changes

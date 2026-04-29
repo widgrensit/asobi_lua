@@ -37,7 +37,21 @@ function on_zone_unloaded(cx, cy, state)     -- return state
 -export([spawn_templates/1, on_world_recovered/2]).
 -export([terrain_provider/1, on_zone_loaded/2, on_zone_unloaded/2]).
 
+%% Wall-clock budgets for Lua callbacks. Init-time callbacks
+%% (`init`, `generate_world`, `phases`, `spawn_templates`,
+%% `terrain_provider`) get more headroom because building a world or a
+%% phase table can be CPU-heavy. Per-tick callbacks share the tighter
+%% TICK_TIMEOUT so a runaway script can't wedge the zone loop.
+-define(INIT_TIMEOUT, 2000).
+-define(GENERATE_TIMEOUT, 5000).
 -define(TICK_TIMEOUT, 500).
+-define(INPUT_TIMEOUT, 100).
+-define(JOIN_TIMEOUT, 200).
+-define(LEAVE_TIMEOUT, 200).
+-define(GET_STATE_TIMEOUT, 100).
+-define(SPAWN_POS_TIMEOUT, 100).
+-define(PHASE_TIMEOUT, 200).
+-define(ZONE_LIFECYCLE_TIMEOUT, 200).
 
 -spec init(map()) -> {ok, map()}.
 init(Config) ->
@@ -58,7 +72,7 @@ init(Config) ->
             },
             LuaSt0a = asobi_lua_api:install(Ctx, LuaSt0),
             {EncConfig, LuaSt1} = luerl:encode(GameConfig, LuaSt0a),
-            case asobi_lua_loader:call(init, [EncConfig], LuaSt1) of
+            case asobi_lua_loader:call(init, [EncConfig], LuaSt1, ?INIT_TIMEOUT) of
                 {ok, [GameState | _], LuaSt2} ->
                     {ok, #{lua_state => LuaSt2, game_state => GameState, script => ScriptPath}};
                 {ok, [], _} ->
@@ -86,7 +100,7 @@ init(Config) ->
 
 -spec join(binary(), map()) -> {ok, map()} | {error, term()}.
 join(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
-    case asobi_lua_loader:call(join, [PlayerId, GS], LuaSt) of
+    case asobi_lua_loader:call(join, [PlayerId, GS], LuaSt, ?JOIN_TIMEOUT) of
         {ok, [GS1 | _], LuaSt1} ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
         {error, Reason} ->
@@ -95,7 +109,7 @@ join(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
 
 -spec leave(binary(), map()) -> {ok, map()}.
 leave(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
-    case asobi_lua_loader:call(leave, [PlayerId, GS], LuaSt) of
+    case asobi_lua_loader:call(leave, [PlayerId, GS], LuaSt, ?LEAVE_TIMEOUT) of
         {ok, [GS1 | _], LuaSt1} ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
         {error, Reason} ->
@@ -105,7 +119,7 @@ leave(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
 
 -spec spawn_position(binary(), map()) -> {ok, {number(), number()}}.
 spawn_position(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
-    case asobi_lua_loader:call(spawn_position, [PlayerId, GS], LuaSt) of
+    case asobi_lua_loader:call(spawn_position, [PlayerId, GS], LuaSt, ?SPAWN_POS_TIMEOUT) of
         {ok, [PosTable | _], LuaSt1} ->
             Pos = decode_position(PosTable, LuaSt1),
             {ok, Pos};
@@ -167,7 +181,7 @@ handle_input(PlayerId, Input, Entities) ->
             {EncEntities, LuaSt2} = luerl:encode(Entities, LuaSt1),
             case
                 asobi_lua_loader:call(
-                    handle_input, [PlayerId, EncInput, EncEntities], LuaSt2
+                    handle_input, [PlayerId, EncInput, EncEntities], LuaSt2, ?INPUT_TIMEOUT
                 )
             of
                 {ok, [Ents1 | _], LuaSt3} ->
@@ -202,7 +216,7 @@ post_tick(TickN, #{lua_state := LuaSt, game_state := GS} = State) ->
 
 -spec generate_world(integer(), map()) -> {ok, map()}.
 generate_world(Seed, #{lua_state := LuaSt} = _Config) ->
-    case asobi_lua_loader:call(generate_world, [Seed, #{}], LuaSt) of
+    case asobi_lua_loader:call(generate_world, [Seed, #{}], LuaSt, ?GENERATE_TIMEOUT) of
         {ok, [ZoneStates | _], LuaSt1} ->
             {ok, decode_zone_states(ZoneStates, LuaSt1)};
         {error, _} ->
@@ -250,7 +264,7 @@ inject_per_zone_lua(ZoneStates, ScriptPath) ->
 
 -spec get_state(binary(), map()) -> map().
 get_state(PlayerId, #{lua_state := LuaSt, game_state := GS}) ->
-    case asobi_lua_loader:call(get_state, [PlayerId, GS], LuaSt) of
+    case asobi_lua_loader:call(get_state, [PlayerId, GS], LuaSt, ?GET_STATE_TIMEOUT) of
         {ok, [PlayerState | _], LuaSt1} ->
             decode_to_map(PlayerState, LuaSt1);
         {error, _} ->
@@ -261,7 +275,7 @@ get_state(PlayerId, #{lua_state := LuaSt, game_state := GS}) ->
 
 -spec phases(map()) -> [map()].
 phases(#{lua_state := LuaSt} = _Config) ->
-    case asobi_lua_loader:call(phases, [#{}], LuaSt) of
+    case asobi_lua_loader:call(phases, [#{}], LuaSt, ?INIT_TIMEOUT) of
         {ok, [PhasesRef | _], LuaSt1} ->
             decode_phases(PhasesRef, LuaSt1);
         {error, _} ->
@@ -272,7 +286,7 @@ phases(_) ->
 
 -spec on_phase_started(binary(), map()) -> {ok, map()}.
 on_phase_started(PhaseName, #{lua_state := LuaSt, game_state := GS} = State) ->
-    case asobi_lua_loader:call(on_phase_started, [PhaseName, GS], LuaSt) of
+    case asobi_lua_loader:call(on_phase_started, [PhaseName, GS], LuaSt, ?PHASE_TIMEOUT) of
         {ok, [GS1 | _], LuaSt1} ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
         {error, _} ->
@@ -281,7 +295,7 @@ on_phase_started(PhaseName, #{lua_state := LuaSt, game_state := GS} = State) ->
 
 -spec on_phase_ended(binary(), map()) -> {ok, map()}.
 on_phase_ended(PhaseName, #{lua_state := LuaSt, game_state := GS} = State) ->
-    case asobi_lua_loader:call(on_phase_ended, [PhaseName, GS], LuaSt) of
+    case asobi_lua_loader:call(on_phase_ended, [PhaseName, GS], LuaSt, ?PHASE_TIMEOUT) of
         {ok, [GS1 | _], LuaSt1} ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
         {error, _} ->
@@ -292,7 +306,7 @@ on_phase_ended(PhaseName, #{lua_state := LuaSt, game_state := GS} = State) ->
 
 -spec spawn_templates(map()) -> #{binary() => asobi_zone_spawner:spawn_template()}.
 spawn_templates(#{lua_state := LuaSt} = _Config) ->
-    case asobi_lua_loader:call(spawn_templates, [#{}], LuaSt) of
+    case asobi_lua_loader:call(spawn_templates, [#{}], LuaSt, ?INIT_TIMEOUT) of
         {ok, [TemplatesRef | _], LuaSt1} ->
             decode_spawn_templates(TemplatesRef, LuaSt1);
         {error, _} ->
@@ -306,7 +320,7 @@ spawn_templates(_) ->
 -spec on_world_recovered(map(), map()) -> {ok, map()}.
 on_world_recovered(Snapshots, #{lua_state := LuaSt, game_state := GS} = State) ->
     {EncSnap, LuaSt1} = luerl:encode(Snapshots, LuaSt),
-    case asobi_lua_loader:call(on_world_recovered, [EncSnap, GS], LuaSt1) of
+    case asobi_lua_loader:call(on_world_recovered, [EncSnap, GS], LuaSt1, ?INIT_TIMEOUT) of
         {ok, [GS1 | _], LuaSt2} ->
             {ok, State#{lua_state => LuaSt2, game_state => GS1}};
         {error, _} ->
@@ -317,7 +331,7 @@ on_world_recovered(Snapshots, #{lua_state := LuaSt, game_state := GS} = State) -
 
 -spec terrain_provider(map()) -> {module(), map()} | none.
 terrain_provider(#{lua_state := LuaSt} = _Config) ->
-    case asobi_lua_loader:call(terrain_provider, [#{}], LuaSt) of
+    case asobi_lua_loader:call(terrain_provider, [#{}], LuaSt, ?INIT_TIMEOUT) of
         {ok, [Result | _], LuaSt1} ->
             decode_terrain_provider(Result, LuaSt1);
         {error, _} ->
@@ -328,7 +342,7 @@ terrain_provider(_) ->
 
 -spec on_zone_loaded({integer(), integer()}, map()) -> {ok, map(), map()}.
 on_zone_loaded({CX, CY}, #{lua_state := LuaSt, game_state := GS} = State) ->
-    case asobi_lua_loader:call(on_zone_loaded, [CX, CY, GS], LuaSt) of
+    case asobi_lua_loader:call(on_zone_loaded, [CX, CY, GS], LuaSt, ?ZONE_LIFECYCLE_TIMEOUT) of
         {ok, [ZS, GS1 | _], LuaSt1} ->
             ZoneState = decode_to_map(ZS, LuaSt1),
             {ok, ZoneState, State#{lua_state => LuaSt1, game_state => GS1}};
@@ -341,7 +355,7 @@ on_zone_loaded({CX, CY}, #{lua_state := LuaSt, game_state := GS} = State) ->
 
 -spec on_zone_unloaded({integer(), integer()}, map()) -> {ok, map()}.
 on_zone_unloaded({CX, CY}, #{lua_state := LuaSt, game_state := GS} = State) ->
-    case asobi_lua_loader:call(on_zone_unloaded, [CX, CY, GS], LuaSt) of
+    case asobi_lua_loader:call(on_zone_unloaded, [CX, CY, GS], LuaSt, ?ZONE_LIFECYCLE_TIMEOUT) of
         {ok, [GS1 | _], LuaSt1} ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
         {error, _} ->
@@ -537,23 +551,10 @@ parse_coords(Bin) ->
     end.
 
 decode_to_map(Term, LuaSt) ->
-    deep_decode(luerl:decode(Term, LuaSt)).
+    asobi_lua_api:decode_to_map(Term, LuaSt).
 
-deep_decode([{K, _} | _] = PropList) when is_binary(K) ->
-    maps:from_list(deep_decode_pairs(PropList));
-deep_decode([{N, _} | _] = NumList) when is_integer(N) ->
-    [deep_decode(Val) || {_, Val} <- lists:sort(NumList)];
-deep_decode(M) when is_map(M) ->
-    maps:map(fun(_, V) -> deep_decode(V) end, M);
-deep_decode(L) when is_list(L) ->
-    [deep_decode(E) || E <- L];
-deep_decode(V) ->
-    V.
-
-deep_decode_pairs([{Key, Val} | Rest]) ->
-    [{Key, deep_decode(Val)} | deep_decode_pairs(Rest)];
-deep_decode_pairs([]) ->
-    [].
+deep_decode(Term) ->
+    asobi_lua_api:deep_decode(Term).
 
 to_number(N) when is_number(N) -> N;
 to_number(_) -> 0.0.

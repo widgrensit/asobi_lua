@@ -46,7 +46,13 @@ op() ->
     ]).
 
 crash_mode() ->
-    proper_types:elements([~"error", ~"type_error", ~"arith_error", ~"stack_overflow"]).
+    %% `infinite_loop` exercises the bridge's per-callback timeout
+    %% wrapping (zone_tick/handle_input both run under TICK_TIMEOUT /
+    %% INPUT_TIMEOUT). Without this entry, the fixture's infinite-loop
+    %% branch was unreachable from the property — see error_world.lua:23.
+    proper_types:elements([
+        ~"error", ~"type_error", ~"arith_error", ~"stack_overflow", ~"infinite_loop"
+    ]).
 
 player() ->
     proper_types:elements([~"e1", ~"e2", ~"e3"]).

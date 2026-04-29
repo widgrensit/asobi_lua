@@ -73,7 +73,7 @@ maybe_load_game_config() ->
 %% --- Multi-mode: config.lua maps mode names to script paths ---
 
 load_multi_mode(GameDir, ConfigPath) ->
-    St0 = luerl:init(),
+    St0 = asobi_lua_loader:init_sandboxed(),
     case do_file(ConfigPath, St0) of
         {ok, [Table | _], St1} ->
             Decoded = luerl:decode(Table, St1),
