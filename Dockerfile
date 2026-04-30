@@ -20,7 +20,9 @@ COPY src/ src/
 RUN rebar3 as prod release
 
 # --- Runtime ---
-FROM debian:bookworm-slim
+# Must match the builder's Debian release (erlang:28.4.2-slim is trixie-based)
+# so the linked-against GLIBC matches at runtime.
+FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libncurses6 libssl3 libtinfo6 ca-certificates tini && \
