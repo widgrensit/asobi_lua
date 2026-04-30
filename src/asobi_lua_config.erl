@@ -256,20 +256,45 @@ apply_game_modes(Modes) ->
 
 %% --- Lua helpers ---
 
+%% M-3: a malicious or buggy config.lua could otherwise hang application
+%% start. The wrapper kills runaway scripts after CONFIG_TIMEOUT_MS so a
+%% bad manifest never blocks the boot process.
+-define(CONFIG_TIMEOUT_MS, 2000).
+
 do_file(Path, St) ->
     case file:read_file(Path) of
         {ok, Code} ->
-            CodeStr = binary_to_list(Code),
-            try luerl:do(CodeStr, St) of
+            do_with_timeout_results(Code, St, ?CONFIG_TIMEOUT_MS);
+        {error, Reason} ->
+            {error, {file_error, Path, Reason}}
+    end.
+
+%% Like asobi_lua_loader:do_with_timeout/3 but preserves the script's
+%% return values — config.lua returns a table that the caller decodes.
+do_with_timeout_results(Code, St, TimeoutMs) ->
+    Self = self(),
+    Ref = make_ref(),
+    Pid = spawn(fun() ->
+        Result =
+            try luerl:do(binary_to_list(Code), St) of
                 {ok, Results, St1} -> {ok, Results, St1};
-                {error, Errors, _St1} -> {error, {lua_error, Errors}};
-                {lua_error, Reason, _St1} -> {error, {lua_error, Reason}}
+                {error, Errors, _} -> {error, {lua_error, Errors}};
+                {lua_error, Reason, _} -> {error, {lua_error, Reason}}
             catch
                 error:{lua_error, Reason, _} -> {error, {lua_error, Reason}};
                 error:Reason -> {error, Reason}
-            end;
-        {error, Reason} ->
-            {error, {file_error, Path, Reason}}
+            end,
+        Self ! {Ref, Result}
+    end),
+    receive
+        {Ref, Result} -> Result
+    after TimeoutMs ->
+        exit(Pid, kill),
+        receive
+            {Ref, _} -> ok
+        after 0 -> ok
+        end,
+        {error, timeout}
     end.
 
 read_global_int(Name, St) ->

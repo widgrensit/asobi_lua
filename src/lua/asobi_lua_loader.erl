@@ -29,12 +29,25 @@ attached (e.g. for evaluating a `config.lua` manifest); use `new/1` to
 load a specific script and pin its base directory for `require`.
 """.
 
--export([new/1, init_sandboxed/0, call/3, call/4]).
+-export([new/1, new/2, init_sandboxed/0, call/3, call/4, do_with_timeout/3]).
+
+-include_lib("kernel/include/file.hrl").
 
 -define(LOADED_TABLE, ~"_ASOBI_LOADED").
+%% M-2/M-3/H-1: any luerl:do/2 invocation that runs script-author code
+%% must enforce a wall-clock budget; otherwise a `while true do end`
+%% in the top-level body hangs the calling gen_server (or the BEAM
+%% itself, when the call happens during application start). 2s is
+%% generous for normal scripts and short enough that an operator
+%% notices the hang.
+-define(DEFAULT_INIT_TIMEOUT_MS, 2000).
 
 -spec new(binary() | string()) -> {ok, dynamic()} | {error, term()}.
 new(ScriptPath) ->
+    new(ScriptPath, ?DEFAULT_INIT_TIMEOUT_MS).
+
+-spec new(binary() | string(), non_neg_integer()) -> {ok, dynamic()} | {error, term()}.
+new(ScriptPath, TimeoutMs) ->
     BaseDir = filename:dirname(to_string(ScriptPath)),
     FileName = filename:basename(to_string(ScriptPath)),
     St0 = sandboxed_state(BaseDir),
@@ -42,16 +55,41 @@ new(ScriptPath) ->
     case file:read_file(FullPath) of
         {ok, Code} ->
             CodeStr = binary_to_list(Code),
-            try luerl:do(CodeStr, St0) of
+            do_with_timeout(CodeStr, St0, TimeoutMs);
+        {error, Reason} ->
+            {error, {file_error, FullPath, Reason}}
+    end.
+
+%% M-2/M-3/H-1: spawn-and-kill wrapper around `luerl:do/2`. Required
+%% any time the input is script-author-controlled — that includes the
+%% top-level body of the loaded script, hot-reload code, and config
+%% manifests evaluated during app start.
+-spec do_with_timeout(string() | binary(), dynamic(), non_neg_integer()) ->
+    {ok, dynamic()} | {error, term()}.
+do_with_timeout(Code, St, TimeoutMs) ->
+    Self = self(),
+    Ref = make_ref(),
+    Pid = spawn(fun() ->
+        Result =
+            try luerl:do(ensure_string(Code), St) of
                 {ok, _Results, St1} -> {ok, St1};
-                {error, Errors, _St1} -> {error, {lua_error, Errors}};
-                {lua_error, Reason, _St1} -> {error, {lua_error, Reason}}
+                {error, Errors, _} -> {error, {lua_error, Errors}};
+                {lua_error, Reason, _} -> {error, {lua_error, Reason}}
             catch
                 error:{lua_error, Reason, _} -> {error, {lua_error, Reason}};
                 error:Reason -> {error, Reason}
-            end;
-        {error, Reason} ->
-            {error, {file_error, FullPath, Reason}}
+            end,
+        Self ! {Ref, Result}
+    end),
+    receive
+        {Ref, Result} -> Result
+    after TimeoutMs ->
+        exit(Pid, kill),
+        receive
+            {Ref, _} -> ok
+        after 0 -> ok
+        end,
+        {error, timeout}
     end.
 
 -spec init_sandboxed() -> dynamic().
@@ -117,6 +155,12 @@ strip_dangerous_globals(St) ->
     %% predicate scripts can check. luerl:set_table_keys/3 works on the
     %% encoded global table; setting a leaf to nil clears it without
     %% deleting the parent table.
+    %%
+    %% L-1: `print` and `eprint` are stripped here because Luerl's
+    %% defaults call `io:format` directly to the BEAM stdout, which
+    %% breaks the structured JSON log stream and lets a tight loop
+    %% flood the runtime's logging driver. Scripts that need to log
+    %% should go through the asobi-side `game.log` API.
     Paths = [
         [~"os", ~"execute"],
         [~"os", ~"exit"],
@@ -130,7 +174,9 @@ strip_dangerous_globals(St) ->
         [~"loadstring"],
         [~"io"],
         [~"package"],
-        [~"require"]
+        [~"require"],
+        [~"print"],
+        [~"eprint"]
     ],
     lists:foldl(
         fun(Path, Acc) ->
@@ -192,7 +238,16 @@ validate_module_name(Name) ->
     %% Allowed: identifier (letters/digits/underscore) optionally
     %% followed by `.identifier` segments. Rejects empty, "..", "/",
     %% leading dots, trailing dots, double dots, and non-ASCII bytes.
-    case re:run(Name, ~"^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$", [{capture, none}]) of
+    %% M-1: `dollar_endonly` makes `$` mean strict end-of-input rather
+    %% than "before a final newline", so `require("foo\n")` no longer
+    %% slips through the validator.
+    case
+        re:run(
+            Name,
+            ~"^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$",
+            [{capture, none}, dollar_endonly]
+        )
+    of
         match -> ok;
         nomatch -> error
     end.
@@ -200,14 +255,31 @@ validate_module_name(Name) ->
 -spec lookup_loaded(binary(), dynamic()) -> {hit, term(), dynamic()} | {miss, dynamic()}.
 lookup_loaded(Name, St) ->
     case luerl:get_table_keys([?LOADED_TABLE, Name], St) of
-        {ok, nil, St1} -> {miss, St1};
-        {ok, Value, St1} -> {hit, Value, St1}
+        {ok, nil, St1} ->
+            {miss, St1};
+        {ok, Value, St1} ->
+            {hit, Value, St1};
+        %% I-2: a script can `_ASOBI_LOADED = nil` or otherwise clobber
+        %% the cache table. Surface a clean Lua-level error instead of
+        %% letting the case_clause crash propagate.
+        {lua_error, _Reason, St1} ->
+            error({lua_error, ~"_ASOBI_LOADED was clobbered by script", St1})
     end.
 
 -spec load_module(binary(), binary(), dynamic()) -> {[term()], dynamic()}.
 load_module(Name, BaseDir, St) ->
     Rel = binary:replace(Name, ~".", ~"/", [global]),
     Path = filename:join(BaseDir, <<Rel/binary, ".lua">>),
+    %% L-4: refuse symlinks at resolve time. file:read_file follows them,
+    %% so a symlink at <base>/foo.lua → /etc/passwd would otherwise be
+    %% read and parsed as Lua, with the parser's error potentially
+    %% leaking content into logs (I-4).
+    case file:read_link_info(Path, [{time, posix}]) of
+        {ok, #file_info{type = symlink}} ->
+            error({lua_error, {require_failed, Name, symlink}, St});
+        _ ->
+            ok
+    end,
     case file:read_file(Path) of
         {ok, Code} ->
             CodeStr = binary_to_list(Code),
@@ -219,12 +291,25 @@ load_module(Name, BaseDir, St) ->
                     %% return is treated as `true`.
                     cache_and_return(Name, true, St1);
                 {error, Errors, _} ->
-                    error({lua_error, {require_failed, Name, Errors}, St});
+                    error({lua_error, {require_failed, Name, truncate_errors(Errors)}, St});
                 Other ->
                     error({lua_error, {require_failed, Name, Other}, St})
             end;
         {error, Reason} ->
             error({lua_error, {require_not_found, Name, Reason}, St})
+    end.
+
+%% I-4: keep the error tail short so a non-Lua file (e.g. a binary
+%% mistakenly placed under the game dir) cannot dump arbitrary bytes
+%% into structured logs via the lua compiler's error message. Luerl's
+%% compiler returns a list of error records; cap to the first few
+%% entries so logs stay bounded even if the underlying format ever
+%% widens.
+-spec truncate_errors([term()]) -> [term()].
+truncate_errors(L) when is_list(L) ->
+    case length(L) > 3 of
+        true -> lists:sublist(L, 3) ++ [truncated];
+        false -> L
     end.
 
 -spec cache_and_return(binary(), term(), dynamic()) -> {[term()], dynamic()}.
@@ -270,3 +355,7 @@ ensure_binary(L) when is_list(L) -> list_to_binary(L).
 -spec to_string(binary() | string()) -> string().
 to_string(B) when is_binary(B) -> binary_to_list(B);
 to_string(L) when is_list(L) -> L.
+
+-spec ensure_string(binary() | string()) -> string().
+ensure_string(B) when is_binary(B) -> binary_to_list(B);
+ensure_string(L) when is_list(L) -> L.

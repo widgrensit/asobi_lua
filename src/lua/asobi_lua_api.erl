@@ -694,16 +694,34 @@ decode_args(Args, St) ->
 %%
 %% Defensive: `ensure_pairs/1` filters out non-`{K, V}` entries silently
 %% so a malformed Lua return won't crash the caller.
+%% M-5: cap recursion depth so a Lua-side table nested 100k levels deep
+%% can't blow the calling gen_server's process heap. The previous
+%% non-tail-recursive implementation grew the stack proportional to Lua
+%% depth — a single malicious return from a callback could OOM the
+%% match. 64 levels covers any realistic game state.
+-define(MAX_DECODE_DEPTH, 64).
+
 -spec deep_decode(term()) -> term().
-deep_decode([{K, _} | _] = PropList) when is_binary(K) ->
-    maps:from_list([{Key, deep_decode(Val)} || {Key, Val} <- ensure_pairs(PropList)]);
-deep_decode([{N, _} | _] = NumList) when is_integer(N) ->
-    [deep_decode(Val) || {_, Val} <- lists:sort(NumList)];
-deep_decode(M) when is_map(M) ->
-    maps:map(fun(_, V) -> deep_decode(V) end, M);
-deep_decode(L) when is_list(L) ->
-    [deep_decode(E) || E <- L];
 deep_decode(V) ->
+    deep_decode(V, 0).
+
+deep_decode(_V, D) when D > ?MAX_DECODE_DEPTH ->
+    %% Truncation policy: replace the over-deep subtree with an atom
+    %% rather than crashing — game callers see a clear marker in the
+    %% returned value.
+    too_deep;
+deep_decode([{K, _} | _] = PropList, D) when is_binary(K) ->
+    maps:from_list([
+        {Key, deep_decode(Val, D + 1)}
+     || {Key, Val} <- ensure_pairs(PropList)
+    ]);
+deep_decode([{N, _} | _] = NumList, D) when is_integer(N) ->
+    [deep_decode(Val, D + 1) || {_, Val} <- lists:sort(NumList)];
+deep_decode(M, D) when is_map(M) ->
+    maps:map(fun(_, V) -> deep_decode(V, D + 1) end, M);
+deep_decode(L, D) when is_list(L) ->
+    [deep_decode(E, D + 1) || E <- L];
+deep_decode(V, _D) ->
     V.
 
 -spec decode_to_map(term(), dynamic()) -> term().

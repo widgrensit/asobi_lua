@@ -364,6 +364,18 @@ on_zone_unloaded({CX, CY}, #{lua_state := LuaSt, game_state := GS} = State) ->
 
 %% --- Internal ---
 
+%% H-2: a Lua script can return any binary as `module`. Without an
+%% allowlist, the bridge would `binary_to_existing_atom` and call
+%% `Mod:init/1`, `Mod:load_chunk/2`, `Mod:generate_chunk/3` on whichever
+%% loaded module the script names — including unrelated OTP modules
+%% (`gen_server`, `rpc`, `application`, etc.). Treat the set of valid
+%% terrain providers as a small explicit list, configurable via env so
+%% operators shipping new providers can extend it without code changes.
+-define(DEFAULT_TERRAIN_PROVIDERS, [
+    asobi_terrain_flat,
+    asobi_terrain_perlin
+]).
+
 decode_terrain_provider(Result, LuaSt) ->
     Decoded = luerl:decode(Result, LuaSt),
     case Decoded of
@@ -378,23 +390,49 @@ decode_terrain_provider(Result, LuaSt) ->
                 undefined ->
                     none;
                 ModBin when is_binary(ModBin) ->
-                    try
-                        Mod = binary_to_existing_atom(ModBin),
-                        DecodedArgs = deep_decode(Args),
-                        ProvArgs =
-                            case is_map(DecodedArgs) of
-                                true -> DecodedArgs;
-                                false -> #{}
-                            end,
-                        {Mod, ProvArgs}
-                    catch
-                        _:_ -> none
+                    case lookup_allowed_provider(ModBin) of
+                        {ok, Mod} ->
+                            DecodedArgs = deep_decode(Args),
+                            ProvArgs =
+                                case is_map(DecodedArgs) of
+                                    true -> DecodedArgs;
+                                    false -> #{}
+                                end,
+                            {Mod, ProvArgs};
+                        not_allowed ->
+                            logger:warning(#{
+                                msg => ~"terrain_provider_not_allowed",
+                                requested => ModBin
+                            }),
+                            none
                     end;
                 _ ->
                     none
             end;
         _ ->
             none
+    end.
+
+-spec lookup_allowed_provider(binary()) -> {ok, atom()} | not_allowed.
+lookup_allowed_provider(ModBin) ->
+    Allowed = allowed_terrain_providers(),
+    AllowedBins = [atom_to_binary(M, utf8) || M <- Allowed],
+    case lists:member(ModBin, AllowedBins) of
+        true ->
+            try
+                {ok, binary_to_existing_atom(ModBin, utf8)}
+            catch
+                _:_ -> not_allowed
+            end;
+        false ->
+            not_allowed
+    end.
+
+-spec allowed_terrain_providers() -> [atom()].
+allowed_terrain_providers() ->
+    case application:get_env(asobi_lua, terrain_providers, ?DEFAULT_TERRAIN_PROVIDERS) of
+        L when is_list(L) -> [M || M <- L, is_atom(M)];
+        _ -> ?DEFAULT_TERRAIN_PROVIDERS
     end.
 
 %% Logs Lua callback failures uniformly. Pre-fix, leave/spawn_position/

@@ -254,6 +254,13 @@ maybe_hot_reload(State) ->
     %% Legacy state from a match created before hot-reload shipped — skip.
     State.
 
+%% H-1: hot-reload runs *script-author* code under no wall-clock budget
+%% on the match gen_server. A `while true do end` in the file body
+%% would otherwise hang the match forever the moment its mtime ticked.
+%% 50× per-callback budget = generous for a real reload, short enough
+%% for an operator to notice the hang.
+-define(RELOAD_TIMEOUT_MS, 5000).
+
 -spec reload_script(file:filename_all(), dynamic()) -> {ok, dynamic()} | {error, term()}.
 reload_script(Path, LuaSt) ->
     case file:read_file(Path) of
@@ -263,13 +270,7 @@ reload_script(Path, LuaSt) ->
             %% Without this, modifications to required modules (e.g.
             %% `boons.lua`) would be invisible until the match restarts.
             CleanLuaSt = clear_require_cache(LuaSt),
-            try luerl:do(binary_to_list(Code), CleanLuaSt) of
-                {ok, _Results, NewLuaSt} -> {ok, NewLuaSt};
-                {error, Errors, _} -> {error, {lua_error, Errors}};
-                Other -> {error, {unexpected, Other}}
-            catch
-                Class:CaughtReason -> {error, {Class, CaughtReason}}
-            end;
+            asobi_lua_loader:do_with_timeout(Code, CleanLuaSt, ?RELOAD_TIMEOUT_MS);
         {error, FileReason} ->
             {error, {file_error, FileReason}}
     end.

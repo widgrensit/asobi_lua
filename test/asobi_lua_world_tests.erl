@@ -135,11 +135,18 @@ terrain_provider_decodes_module_test() ->
         end
         """
     ),
+    %% H-2: terrain provider modules must be on the allowlist. Add
+    %% `erlang` for this round-trip test only.
+    Old = application:get_env(asobi_lua, terrain_providers),
+    application:set_env(asobi_lua, terrain_providers, [erlang]),
     try
         {ok, S0} = asobi_lua_world:init(#{lua_script => Path}),
-        %% erlang is a real module so binary_to_existing_atom finds it.
         ?assertMatch({erlang, #{}}, asobi_lua_world:terrain_provider(S0))
     after
+        case Old of
+            {ok, V} -> application:set_env(asobi_lua, terrain_providers, V);
+            undefined -> application:unset_env(asobi_lua, terrain_providers)
+        end,
         file:delete(Path)
     end.
 

@@ -107,19 +107,51 @@ terminate(_, _) ->
 
 %% --- AI Decision ---
 
+%% I-6: when `think/2` errors the bot silently falls back to the
+%% built-in default AI. That hides bugs in operator scripts. Emit a
+%% rate-limited warning (one log line per bot per minute) so a
+%% persistently-broken script is visible without spamming logs.
+-define(THINK_LOG_INTERVAL_MS, 60000).
+
 send_input(#{lua_state := undefined, bot_id := BotId, match_pid := MatchPid, game_state := GS}) ->
     Input = default_ai(BotId, GS),
     asobi_match_server:handle_input(MatchPid, BotId, Input);
-send_input(#{lua_state := LuaSt, bot_id := BotId, match_pid := MatchPid, game_state := GS}) ->
+send_input(
+    #{lua_state := LuaSt, bot_id := BotId, match_pid := MatchPid, game_state := GS} = State
+) ->
     {EncGS, LuaSt1} = luerl:encode(GS, LuaSt),
     Input =
         case asobi_lua_loader:call(think, [BotId, EncGS], LuaSt1, 50) of
             {ok, [Result | _], LuaSt2} ->
                 decode_result(Result, LuaSt2);
+            {error, Reason} ->
+                maybe_log_think_error(BotId, Reason, State),
+                default_ai(BotId, GS);
             _ ->
                 default_ai(BotId, GS)
         end,
     asobi_match_server:handle_input(MatchPid, BotId, Input).
+
+-spec maybe_log_think_error(binary(), term(), map()) -> ok.
+maybe_log_think_error(BotId, Reason, _State) ->
+    Now = erlang:system_time(millisecond),
+    Last =
+        case persistent_term:get({?MODULE, last_think_error, BotId}, 0) of
+            N when is_integer(N) -> N;
+            _ -> 0
+        end,
+    case Now - Last >= ?THINK_LOG_INTERVAL_MS of
+        true ->
+            persistent_term:put({?MODULE, last_think_error, BotId}, Now),
+            logger:warning(#{
+                msg => ~"bot_think_error_falling_back_to_default_ai",
+                bot_id => BotId,
+                reason => Reason
+            }),
+            ok;
+        false ->
+            ok
+    end.
 
 default_ai(BotId, GameState) ->
     Players = maps:get(players, GameState, maps:get(~"players", GameState, #{})),
