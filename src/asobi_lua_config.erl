@@ -33,6 +33,11 @@ bots         = { script = "bots/ai.lua" } -- optional
 game_type    = "world"                    -- optional, "match" (default) or "world"
 
 -- World mode config (large session games, game_type = "world"):
+tick_rate               = 50              -- optional, ms per world tick (default 50 = 20 Hz)
+grid_size               = 1               -- optional, zones per dimension (default 10)
+zone_size               = 1200            -- optional, world units per zone (default 200)
+view_radius             = 0               -- optional, zone radius a player subscribes to (default 1)
+persistent              = false           -- optional, snapshot zones to DB across restarts
 lazy_zones              = true            -- optional, on-demand zone loading
 zone_idle_timeout       = 30000           -- optional, ms before idle zone is reaped
 max_active_zones        = 10000           -- optional, cap on concurrent zones
@@ -141,6 +146,11 @@ read_match_globals(ScriptPath, St) ->
     Strategy = read_global_string(~"strategy", St),
     Bots = read_global_table(~"bots", St),
     GameType = read_global_string(~"game_type", St),
+    TickRate = read_global_int(~"tick_rate", St),
+    GridSize = read_global_int(~"grid_size", St),
+    ZoneSize = read_global_int(~"zone_size", St),
+    ViewRadius = read_global_int(~"view_radius", St),
+    Persistent = read_global_bool(~"persistent", St),
     LazyZones = read_global_bool(~"lazy_zones", St),
     ZoneIdleTimeout = read_global_int(~"zone_idle_timeout", St),
     MaxActiveZones = read_global_int(~"max_active_zones", St),
@@ -169,7 +179,12 @@ read_match_globals(ScriptPath, St) ->
             Config6 = maybe_add_int(Config5, cold_tick_divisor, ColdTickDivisor),
             Config7 = maybe_add_int(Config6, empty_grace_ms, EmptyGraceMs),
             Config8 = maybe_add_player_ttl(Config7, PlayerTtlMs),
-            {ok, Config8};
+            Config9 = maybe_add_int(Config8, tick_rate, TickRate),
+            Config10 = maybe_add_int(Config9, grid_size, GridSize),
+            Config11 = maybe_add_int(Config10, zone_size, ZoneSize),
+            Config12 = maybe_add_non_neg_int(Config11, view_radius, ViewRadius),
+            Config13 = maybe_add_bool(Config12, persistent, Persistent),
+            {ok, Config13};
         _ ->
             {error, {ScriptPath, ~"match_size must be a positive integer"}}
     end.
@@ -211,6 +226,20 @@ maybe_add_int(Config, Key, Val) when is_integer(Val), Val > 0 ->
     Config#{Key => Val};
 maybe_add_int(Config, _Key, _Val) ->
     Config.
+
+%% Like maybe_add_int/3 but accepts 0 — used for view_radius, where 0 is a
+%% legitimate value (subscribe only to your own zone).
+maybe_add_non_neg_int(Config, _Key, undefined) ->
+    Config;
+maybe_add_non_neg_int(Config, Key, Val) when is_integer(Val), Val >= 0 ->
+    Config#{Key => Val};
+maybe_add_non_neg_int(Config, _Key, _Val) ->
+    Config.
+
+maybe_add_bool(Config, _Key, undefined) ->
+    Config;
+maybe_add_bool(Config, Key, Val) when is_boolean(Val) ->
+    Config#{Key => Val}.
 
 %% player_ttl_ms accepts 0 (remove on disconnect, default), -1 (keep forever),
 %% or a positive grace window in ms. Any integer is a valid override.
