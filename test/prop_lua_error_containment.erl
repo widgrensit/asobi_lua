@@ -15,7 +15,7 @@
 %% The bridge logs lua errors and returns the previous (entities, state)
 %% so a misbehaving Lua callback can't escalate to a zone-process crash.
 
--define(NUMTESTS, 30).
+-define(NUMTESTS, list_to_integer(os:getenv("PROPER_NUMTESTS", "30"))).
 -define(PD_KEY, {asobi_lua_world, zone_state}).
 
 lua_error_containment_test_() ->
