@@ -443,13 +443,31 @@ event. Structure it however you like -- clients will receive it as JSON.
 
 Your Lua scripts have access to:
 
-- **Standard Lua**: `table`, `string`, `math`, `pairs`, `ipairs`, `type`, `tostring`, `tonumber`, etc.
-- **`math.random(n)`**: Random integer 1..n (uses Erlang's `rand` module)
-- **`math.sqrt(n)`**: Square root
-- **`require(module)`**: Load other Lua files from your game directory
+- **Standard Lua**: `table`, `string`, `math`, `utf8`, `bit32`, `pairs`,
+  `ipairs`, `next`, `type`, `tostring`, `tonumber`, `pcall`, `error`,
+  `assert`, `setmetatable`/`getmetatable`, `rawget`/`rawset`/`rawequal`/`rawlen`
+- **Time helpers**: `os.clock`, `os.date`, `os.difftime`, `os.time`
+- **`math.random(n)`**: integer in `[1, n]`. **`math.random(a, b)` is not
+  supported** — pass a single argument and bias it yourself.
+- **`math.sqrt(n)`**: square root. Negative input returns `0.0`.
+- **`require("foo.bar")`**: loads `foo/bar.lua` relative to your game
+  directory. Names are validated; `..`, `/`, and absolute paths are
+  rejected. Modules are cached, and `asobi_lua_match` clears the cache
+  on hot-reload so changes to required files pick up.
 
-For safety, filesystem and OS functions (`io`, `os.execute`, `loadfile`) are
-**not** available. Your scripts run sandboxed inside the BEAM.
+The following are removed from the Lua environment:
+
+- **OS escape hatches**: `os.execute`, `os.exit`, `os.getenv`,
+  `os.remove`, `os.rename`, `os.tmpname`
+- **Code loaders**: `dofile`, `loadfile`, `load`, `loadstring`
+- **I/O**: the entire `io` library (`io.open`, `io.read`, `io.write`, ...)
+- **Package machinery**: `package` and the default `require`. Use the
+  asobi_lua-controlled `require/1` described above instead.
+
+Every Lua callback also runs under a wall-clock timeout. A `while true do end`
+in any callback is killed when the budget elapses; the bridge logs a warning
+and continues with the previous state. See [SECURITY.md](../SECURITY.md#sandbox-model)
+for the full sandbox model and per-callback timeout limits.
 
 ## World Mode: Large Sessions with Zones
 

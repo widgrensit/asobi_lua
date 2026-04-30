@@ -64,6 +64,7 @@ game.terrain.preload(coords_list)                -- preload chunks async
 """.
 
 -export([install/2]).
+-export([deep_decode/1, decode_to_map/2]).
 
 -spec install(map(), dynamic()) -> dynamic().
 install(Ctx, St0) ->
@@ -681,17 +682,51 @@ wrap_result({error, Reason}, St) -> error_result(Reason, St).
 decode_args(Args, St) ->
     [deep_decode(luerl:decode(A, St)) || A <- Args].
 
+%% Recursively turn a Luerl-decoded term into native Erlang terms.
+%%
+%% Luerl's `decode/2` returns Lua tables as proplists keyed by binaries
+%% (string keys) or integers (sequential keys). Mixed-key tables come
+%% back as a single proplist; nested tables are still proplists. This
+%% function picks the right Erlang shape based on the proplist's key
+%% type — string keys → map, integer keys → ordered list (re-sorted by
+%% the Lua index because Luerl does not promise key order) — and
+%% recurses into every value so the result is fully native.
+%%
+%% Defensive: `ensure_pairs/1` filters out non-`{K, V}` entries silently
+%% so a malformed Lua return won't crash the caller.
+%% M-5: cap recursion depth so a Lua-side table nested 100k levels deep
+%% can't blow the calling gen_server's process heap. The previous
+%% non-tail-recursive implementation grew the stack proportional to Lua
+%% depth — a single malicious return from a callback could OOM the
+%% match. 64 levels covers any realistic game state.
+-define(MAX_DECODE_DEPTH, 64).
+
 -spec deep_decode(term()) -> term().
-deep_decode([{K, _} | _] = PropList) when is_binary(K) ->
-    maps:from_list([{Key, deep_decode(Val)} || {Key, Val} <- ensure_pairs(PropList)]);
-deep_decode([{N, _} | _] = NumList) when is_integer(N) ->
-    [deep_decode(Val) || {_, Val} <- lists:sort(NumList)];
-deep_decode(M) when is_map(M) ->
-    maps:map(fun(_, V) -> deep_decode(V) end, M);
-deep_decode(L) when is_list(L) ->
-    [deep_decode(E) || E <- L];
 deep_decode(V) ->
+    deep_decode(V, 0).
+
+deep_decode(_V, D) when D > ?MAX_DECODE_DEPTH ->
+    %% Truncation policy: replace the over-deep subtree with an atom
+    %% rather than crashing — game callers see a clear marker in the
+    %% returned value.
+    too_deep;
+deep_decode([{K, _} | _] = PropList, D) when is_binary(K) ->
+    maps:from_list([
+        {Key, deep_decode(Val, D + 1)}
+     || {Key, Val} <- ensure_pairs(PropList)
+    ]);
+deep_decode([{N, _} | _] = NumList, D) when is_integer(N) ->
+    [deep_decode(Val, D + 1) || {_, Val} <- lists:sort(NumList)];
+deep_decode(M, D) when is_map(M) ->
+    maps:map(fun(_, V) -> deep_decode(V, D + 1) end, M);
+deep_decode(L, D) when is_list(L) ->
+    [deep_decode(E, D + 1) || E <- L];
+deep_decode(V, _D) ->
     V.
+
+-spec decode_to_map(term(), dynamic()) -> term().
+decode_to_map(Term, LuaSt) ->
+    deep_decode(luerl:decode(Term, LuaSt)).
 
 %% --- Leaderboard encoding ---
 

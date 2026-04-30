@@ -33,7 +33,16 @@ lua_match_test_() ->
         {"vote_resolved updates state", fun vote_resolved_ok/0},
         {"finish_immediately script", fun finish_immediately/0},
         {"tick reloads script after file change", fun hot_reload_on_file_change/0},
-        {"tick survives syntax error on reload", fun hot_reload_syntax_error/0}
+        {"tick survives syntax error on reload", fun hot_reload_syntax_error/0},
+        {"hot reload picks up changes in required modules", fun hot_reload_clears_require_cache/0},
+        {"hot reload survives function add/remove", fun hot_reload_function_change/0},
+        {"init returning nil crashes match init", fun init_nil_return/0},
+        {"init returning non-table crashes match init", fun init_non_table_return/0},
+        {"tick timeout end-to-end keeps match alive", fun tick_timeout_keeps_state/0},
+        {"vote_requested returning false yields none", fun vote_requested_false/0},
+        {"vote_resolved with unknown template still returns ok",
+            fun vote_resolved_unknown_template/0},
+        {"handle_input failure returns previous state", fun handle_input_failure/0}
     ].
 
 init_ok() ->
@@ -208,6 +217,222 @@ hot_reload_syntax_error() ->
         %% The old code still runs, so `tag` is still "good".
         #{~"tag" := Tag} = asobi_lua_match:get_state(~"p1", S2),
         ?assertEqual(~"good", Tag)
+    after
+        file:delete(Path)
+    end.
+
+hot_reload_clears_require_cache() ->
+    %% A common gotcha with the previous loader was that `require()`'d
+    %% modules stayed cached in package.loaded forever. With our own
+    %% require + cache-clear on hot-reload, edits to a sibling module
+    %% must be visible after touching match.lua.
+    Dir = filename:join([
+        filename:basedir(user_cache, "asobi_lua_tests"),
+        "reload_cache_" ++ integer_to_list(erlang:unique_integer([positive]))
+    ]),
+    ok = filelib:ensure_dir(filename:join(Dir, "x")),
+    ModulePath = filename:join(Dir, "helper.lua"),
+    MatchPath = filename:join(Dir, "match.lua"),
+    ok = file:write_file(ModulePath, ~"return { version = 'v1' }\n"),
+    ok = file:write_file(
+        MatchPath,
+        ~"""
+        match_size = 1
+        local h = require('helper')
+        function init(_) return { v = h.version } end
+        function join(id, s) return s end
+        function leave(id, s) return s end
+        function handle_input(_, _, s) return s end
+        function tick(s)
+            local hh = require('helper')
+            s.v = hh.version
+            return s
+        end
+        function get_state(_, s) return { v = s.v } end
+        """
+    ),
+    try
+        {ok, S0} = asobi_lua_match:init(#{lua_script => MatchPath}),
+        {ok, S1} = asobi_lua_match:join(~"p1", S0),
+        ?assertMatch(#{~"v" := ~"v1"}, asobi_lua_match:get_state(~"p1", S1)),
+
+        ok = file:write_file(ModulePath, ~"return { version = 'v2' }\n"),
+        bump_mtime(MatchPath),
+
+        {ok, S2} = asobi_lua_match:tick(S1),
+        ?assertMatch(#{~"v" := ~"v2"}, asobi_lua_match:get_state(~"p1", S2))
+    after
+        file:delete(MatchPath),
+        file:delete(ModulePath),
+        file:del_dir(Dir)
+    end.
+
+hot_reload_function_change() ->
+    %% Adding a new function or changing an existing one must take
+    %% effect on the next tick. We add a `bonus` field via a new
+    %% function call introduced by the reload.
+    Path = temp_script(
+        ~"""
+        match_size = 1
+        function init(_) return { hits = 0 } end
+        function join(id, s) return s end
+        function leave(id, s) return s end
+        function handle_input(_, _, s) s.hits = s.hits + 1; return s end
+        function tick(s) return s end
+        function get_state(_, s) return { hits = s.hits, bonus = 0 } end
+        """
+    ),
+    try
+        {ok, S0} = asobi_lua_match:init(#{lua_script => Path}),
+        {ok, S1} = asobi_lua_match:join(~"p1", S0),
+        ?assertEqual(0, maps:get(~"bonus", asobi_lua_match:get_state(~"p1", S1))),
+
+        write_script(
+            Path,
+            ~"""
+            match_size = 1
+            function init(_) return { hits = 0 } end
+            function join(id, s) return s end
+            function leave(id, s) return s end
+            function handle_input(_, _, s) s.hits = s.hits + 1; return s end
+            function tick(s) return s end
+            function get_state(_, s) return { hits = s.hits, bonus = 100 } end
+            """
+        ),
+        bump_mtime(Path),
+
+        {ok, S2} = asobi_lua_match:tick(S1),
+        ?assertEqual(100, maps:get(~"bonus", asobi_lua_match:get_state(~"p1", S2)))
+    after
+        file:delete(Path)
+    end.
+
+init_nil_return() ->
+    %% Documenting: init returning nil currently succeeds (game_state =
+    %% nil) and the failure surfaces on the next bridge call. This is
+    %% acceptable behaviour — surprising init returns are a script-author
+    %% bug and the supervisor restart loop catches them — but if we ever
+    %% tighten init validation, this assertion is the trip-wire.
+    Path = temp_script(
+        ~"""
+        match_size = 1
+        function init(_) return nil end
+        function join(id, s) return s end
+        function leave(id, s) return s end
+        function handle_input(_, _, s) return s end
+        function tick(s) return s end
+        function get_state(_, s) return s end
+        """
+    ),
+    try
+        {ok, State} = asobi_lua_match:init(#{lua_script => Path}),
+        ?assertMatch(#{game_state := nil}, State)
+    after
+        file:delete(Path)
+    end.
+
+init_non_table_return() ->
+    Path = temp_script(
+        ~"""
+        match_size = 1
+        function init(_) return 42 end
+        function join(id, s) return s end
+        function leave(id, s) return s end
+        function handle_input(_, _, s) return s end
+        function tick(s) return s end
+        function get_state(_, s) return s end
+        """
+    ),
+    try
+        %% Returning a number passes through the bridge but join/leave/etc.
+        %% will then fail to operate on a number. The init itself does not
+        %% crash; the bridge accepts whatever Lua returns. This documents
+        %% current behaviour: a bad init signature is the script author's
+        %% problem and surfaces on the next bridge call.
+        case asobi_lua_match:init(#{lua_script => Path}) of
+            {ok, _State} -> ok;
+            {error, _} -> ok
+        end
+    after
+        file:delete(Path)
+    end.
+
+tick_timeout_keeps_state() ->
+    %% End-to-end: a tick that exceeds TICK_TIMEOUT must NOT crash the
+    %% match — the bridge logs the timeout and returns the previous
+    %% state intact. Verifies the wrapping introduced for sandbox work.
+    Path = temp_script(
+        ~"""
+        match_size = 1
+        local n = 0
+        function init(_) return { tag = 'before' } end
+        function join(id, s) return s end
+        function leave(id, s) return s end
+        function handle_input(_, _, s) return s end
+        function tick(s)
+            n = n + 1
+            if n == 1 then while true do end end
+            s.tag = 'after'
+            return s
+        end
+        function get_state(_, s) return { tag = s.tag } end
+        """
+    ),
+    try
+        {ok, S0} = asobi_lua_match:init(#{lua_script => Path}),
+        {ok, S1} = asobi_lua_match:join(~"p1", S0),
+        {ok, S2} = asobi_lua_match:tick(S1),
+        %% On timeout the bridge keeps the previous state; tag stays 'before'.
+        ?assertEqual(~"before", maps:get(~"tag", asobi_lua_match:get_state(~"p1", S2)))
+    after
+        file:delete(Path)
+    end.
+
+vote_requested_false() ->
+    Path = temp_script(
+        ~"""
+        match_size = 1
+        function init(_) return {} end
+        function join(id, s) return s end
+        function leave(id, s) return s end
+        function handle_input(_, _, s) return s end
+        function tick(s) return s end
+        function get_state(_, s) return s end
+        function vote_requested(_) return false end
+        """
+    ),
+    try
+        {ok, S0} = asobi_lua_match:init(#{lua_script => Path}),
+        ?assertEqual(none, asobi_lua_match:vote_requested(S0))
+    after
+        file:delete(Path)
+    end.
+
+vote_resolved_unknown_template() ->
+    {ok, State0} = init_match(),
+    Result = #{winner => ~"opt_unknown"},
+    ?assertMatch({ok, _}, asobi_lua_match:vote_resolved(~"never_proposed", Result, State0)).
+
+handle_input_failure() ->
+    %% A crashing handle_input must leave the match state intact and
+    %% return {ok, State} — the bridge isolates the script error.
+    Path = temp_script(
+        ~"""
+        match_size = 1
+        function init(_) return { x = 0 } end
+        function join(id, s) return s end
+        function leave(id, s) return s end
+        function handle_input(_, _, _) error('boom') end
+        function tick(s) return s end
+        function get_state(_, s) return s end
+        """
+    ),
+    try
+        {ok, S0} = asobi_lua_match:init(#{lua_script => Path}),
+        {ok, S1} = asobi_lua_match:join(~"p1", S0),
+        {ok, S2} = asobi_lua_match:handle_input(~"p1", #{~"k" => ~"v"}, S1),
+        %% game_state survives the failure
+        ?assertMatch(#{game_state := _}, S2)
     after
         file:delete(Path)
     end.

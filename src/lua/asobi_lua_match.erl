@@ -38,7 +38,18 @@ function vote_resolved(template, result, state) -- return updated state
 -export([init/1, join/2, leave/2, handle_input/3, tick/1, get_state/2]).
 -export([vote_requested/1, vote_resolved/3]).
 
+%% A sandboxed Lua callback runs in a child process so the parent
+%% gen_server stays responsive. These wall-clock budgets cap how long a
+%% misbehaving script can hold the channel — `init` gets the most slack
+%% because game state may be expensive to build, the per-tick callbacks
+%% get the least because they run hundreds of times per second.
+-define(INIT_TIMEOUT, 1000).
 -define(TICK_TIMEOUT, 500).
+-define(INPUT_TIMEOUT, 100).
+-define(JOIN_TIMEOUT, 200).
+-define(LEAVE_TIMEOUT, 200).
+-define(GET_STATE_TIMEOUT, 100).
+-define(VOTE_TIMEOUT, 200).
 
 -spec init(map()) -> {ok, map()}.
 init(Config) ->
@@ -59,7 +70,7 @@ init(Config) ->
             },
             LuaSt0a = asobi_lua_api:install(Ctx, LuaSt0),
             {EncConfig, LuaSt1} = luerl:encode(GameConfig, LuaSt0a),
-            case asobi_lua_loader:call(init, [EncConfig], LuaSt1) of
+            case asobi_lua_loader:call(init, [EncConfig], LuaSt1, ?INIT_TIMEOUT) of
                 {ok, [GameState | _], LuaSt2} ->
                     {ok, #{
                         lua_state => LuaSt2,
@@ -94,7 +105,7 @@ init(Config) ->
 
 -spec join(binary(), map()) -> {ok, map()} | {error, term()}.
 join(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
-    case asobi_lua_loader:call(join, [PlayerId, GS], LuaSt) of
+    case asobi_lua_loader:call(join, [PlayerId, GS], LuaSt, ?JOIN_TIMEOUT) of
         {ok, [GS1 | _], LuaSt1} ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
         {error, Reason} ->
@@ -104,7 +115,7 @@ join(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
 
 -spec leave(binary(), map()) -> {ok, map()}.
 leave(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
-    case asobi_lua_loader:call(leave, [PlayerId, GS], LuaSt) of
+    case asobi_lua_loader:call(leave, [PlayerId, GS], LuaSt, ?LEAVE_TIMEOUT) of
         {ok, [GS1 | _], LuaSt1} ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
         {error, Reason} ->
@@ -115,7 +126,7 @@ leave(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
 -spec handle_input(binary(), map(), map()) -> {ok, map()}.
 handle_input(PlayerId, Input, #{lua_state := LuaSt, game_state := GS} = State) ->
     {EncInput, LuaSt1} = luerl:encode(Input, LuaSt),
-    case asobi_lua_loader:call(handle_input, [PlayerId, EncInput, GS], LuaSt1) of
+    case asobi_lua_loader:call(handle_input, [PlayerId, EncInput, GS], LuaSt1, ?INPUT_TIMEOUT) of
         {ok, [GS1 | _], LuaSt2} ->
             {ok, State#{lua_state => LuaSt2, game_state => GS1}};
         {error, Reason} ->
@@ -146,7 +157,7 @@ tick(State0) ->
 
 -spec get_state(binary(), map()) -> map().
 get_state(PlayerId, #{lua_state := LuaSt, game_state := GS} = _State) ->
-    case asobi_lua_loader:call(get_state, [PlayerId, GS], LuaSt) of
+    case asobi_lua_loader:call(get_state, [PlayerId, GS], LuaSt, ?GET_STATE_TIMEOUT) of
         {ok, [PlayerState | _], LuaSt1} ->
             decode_to_map(PlayerState, LuaSt1);
         {error, _} ->
@@ -155,7 +166,7 @@ get_state(PlayerId, #{lua_state := LuaSt, game_state := GS} = _State) ->
 
 -spec vote_requested(map()) -> {ok, map()} | none.
 vote_requested(#{lua_state := LuaSt, game_state := GS}) ->
-    case asobi_lua_loader:call(vote_requested, [GS], LuaSt) of
+    case asobi_lua_loader:call(vote_requested, [GS], LuaSt, ?VOTE_TIMEOUT) of
         {ok, [nil | _], _} ->
             none;
         {ok, [false | _], _} ->
@@ -173,7 +184,7 @@ vote_requested(#{lua_state := LuaSt, game_state := GS}) ->
 -spec vote_resolved(binary(), map(), map()) -> {ok, map()}.
 vote_resolved(Template, Result, #{lua_state := LuaSt, game_state := GS} = State) ->
     {EncResult, LuaSt1} = luerl:encode(Result, LuaSt),
-    case asobi_lua_loader:call(vote_resolved, [Template, EncResult, GS], LuaSt1) of
+    case asobi_lua_loader:call(vote_resolved, [Template, EncResult, GS], LuaSt1, ?VOTE_TIMEOUT) of
         {ok, [GS1 | _], LuaSt2} ->
             {ok, State#{lua_state => LuaSt2, game_state => GS1}};
         {error, _} ->
@@ -184,10 +195,10 @@ vote_resolved(Template, Result, #{lua_state := LuaSt, game_state := GS} = State)
 
 is_finished(GS, LuaSt) ->
     try
-        {ok, FinVal, LuaSt1} = luerl:get_table_key(GS, <<"_finished">>, LuaSt),
+        {ok, FinVal, LuaSt1} = luerl:get_table_key(GS, ~"_finished", LuaSt),
         case FinVal of
             true ->
-                case luerl:get_table_key(GS, <<"_result">>, LuaSt1) of
+                case luerl:get_table_key(GS, ~"_result", LuaSt1) of
                     {ok, ResRef, LuaSt2} -> {true, decode_to_map(ResRef, LuaSt2)};
                     _ -> {true, #{}}
                 end;
@@ -243,31 +254,32 @@ maybe_hot_reload(State) ->
     %% Legacy state from a match created before hot-reload shipped — skip.
     State.
 
--spec reload_script(file:filename_all(), term()) -> {ok, term()} | {error, term()}.
+%% H-1: hot-reload runs *script-author* code under no wall-clock budget
+%% on the match gen_server. A `while true do end` in the file body
+%% would otherwise hang the match forever the moment its mtime ticked.
+%% 50× per-callback budget = generous for a real reload, short enough
+%% for an operator to notice the hang.
+-define(RELOAD_TIMEOUT_MS, 5000).
+
+-spec reload_script(file:filename_all(), dynamic()) -> {ok, dynamic()} | {error, term()}.
 reload_script(Path, LuaSt) ->
     case file:read_file(Path) of
         {ok, Code} ->
-            try luerl:do(binary_to_list(Code), LuaSt) of
-                {ok, _Results, NewLuaSt} -> {ok, NewLuaSt};
-                {error, Errors, _} -> {error, {lua_error, Errors}};
-                Other -> {error, {unexpected, Other}}
-            catch
-                Class:CaughtReason -> {error, {Class, CaughtReason}}
-            end;
+            %% Clear the asobi_lua require cache so any `require("foo")`
+            %% that runs after the reload re-reads `foo.lua` from disk.
+            %% Without this, modifications to required modules (e.g.
+            %% `boons.lua`) would be invisible until the match restarts.
+            CleanLuaSt = clear_require_cache(LuaSt),
+            asobi_lua_loader:do_with_timeout(Code, CleanLuaSt, ?RELOAD_TIMEOUT_MS);
         {error, FileReason} ->
             {error, {file_error, FileReason}}
     end.
 
-decode_to_map(Term, LuaSt) ->
-    deep_decode(luerl:decode(Term, LuaSt)).
+-spec clear_require_cache(dynamic()) -> dynamic().
+clear_require_cache(LuaSt) ->
+    {Empty, LuaSt1} = luerl:encode(#{}, LuaSt),
+    {ok, LuaSt2} = luerl:set_table_keys([~"_ASOBI_LOADED"], Empty, LuaSt1),
+    LuaSt2.
 
-deep_decode([{K, _} | _] = PropList) when is_binary(K) ->
-    maps:from_list([{Key, deep_decode(Val)} || {Key, Val} <- PropList]);
-deep_decode([{N, _} | _] = NumList) when is_integer(N) ->
-    [deep_decode(Val) || {_, Val} <- lists:sort(NumList)];
-deep_decode(M) when is_map(M) ->
-    maps:map(fun(_, V) -> deep_decode(V) end, M);
-deep_decode(L) when is_list(L) ->
-    [deep_decode(E) || E <- L];
-deep_decode(V) ->
-    V.
+decode_to_map(Term, LuaSt) ->
+    asobi_lua_api:decode_to_map(Term, LuaSt).

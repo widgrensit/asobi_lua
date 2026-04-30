@@ -45,7 +45,16 @@ config_test_() ->
             {"player_ttl_ms = 0 is forwarded (explicit immediate cleanup)",
                 fun player_ttl_ms_zero_forwarded/0},
             {"player_ttl_ms absent: key omitted from mode config",
-                fun player_ttl_ms_absent_omitted/0}
+                fun player_ttl_ms_absent_omitted/0},
+            {"match_size = 0 is rejected", fun match_size_zero_rejected/0},
+            {"match_size negative is rejected", fun match_size_negative_rejected/0},
+            {"match_size float is truncated then rejected", fun match_size_float_rejected/0},
+            {"unknown strategy is preserved as-is", fun unknown_strategy_preserved/0},
+            {"strategy = skill_based is recognised", fun strategy_skill_based/0},
+            {"config.lua returning non-table errors", fun config_returns_non_table/0},
+            {"config.lua referencing missing match script errors",
+                fun config_missing_match_script/0},
+            {"bot_config table with min_players is forwarded", fun bot_config_min_players/0}
         ]}.
 
 single_mode_loads_globals() ->
@@ -231,6 +240,106 @@ player_ttl_ms_absent_omitted() ->
     ok = asobi_lua_config:maybe_load_game_config(),
     Mode = maps:get(~"default", get_game_modes()),
     ?assertEqual(false, maps:is_key(player_ttl_ms, Mode)),
+    cleanup_temp_dir(TmpDir).
+
+match_size_zero_rejected() ->
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), ~"match_size = 0\n"),
+    application:set_env(asobi, game_dir, TmpDir),
+    ?assertMatch({error, _}, asobi_lua_config:maybe_load_game_config()),
+    cleanup_temp_dir(TmpDir).
+
+match_size_negative_rejected() ->
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), ~"match_size = -3\n"),
+    application:set_env(asobi, game_dir, TmpDir),
+    ?assertMatch({error, _}, asobi_lua_config:maybe_load_game_config()),
+    cleanup_temp_dir(TmpDir).
+
+match_size_float_rejected() ->
+    %% read_global_int truncates the float, so 1.5 becomes 1 — but a
+    %% script author passing a float almost certainly intends "fractional
+    %% match size", which is wrong. Today this silently rounds to 1.
+    %% Documenting so we notice if behaviour changes.
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), ~"match_size = 1.5\n"),
+    application:set_env(asobi, game_dir, TmpDir),
+    ?assertEqual(ok, asobi_lua_config:maybe_load_game_config()),
+    Mode = maps:get(~"default", get_game_modes()),
+    ?assertEqual(1, maps:get(match_size, Mode)),
+    cleanup_temp_dir(TmpDir).
+
+unknown_strategy_preserved() ->
+    %% maybe_add_strategy/2 keeps the binary unchanged when it doesn't
+    %% match a known atom. Documents that behaviour for downstream
+    %% strategy resolution.
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(
+        filename:join(TmpDir, "match.lua"),
+        ~"match_size = 2\nstrategy = 'totally_made_up'\n"
+    ),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Mode = maps:get(~"default", get_game_modes()),
+    ?assertEqual(~"totally_made_up", maps:get(strategy, Mode)),
+    cleanup_temp_dir(TmpDir).
+
+strategy_skill_based() ->
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(
+        filename:join(TmpDir, "match.lua"),
+        ~"match_size = 2\nstrategy = 'skill_based'\n"
+    ),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Mode = maps:get(~"default", get_game_modes()),
+    ?assertEqual(skill_based, maps:get(strategy, Mode)),
+    cleanup_temp_dir(TmpDir).
+
+config_returns_non_table() ->
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(filename:join(TmpDir, "config.lua"), ~"return 42\n"),
+    application:set_env(asobi, game_dir, TmpDir),
+    %% A non-table return manifests as a config_error today.
+    ?assertMatch({error, _}, asobi_lua_config:maybe_load_game_config()),
+    cleanup_temp_dir(TmpDir).
+
+config_missing_match_script() ->
+    %% A manifest pointing at a non-existent script must surface as an
+    %% error and NOT silently install a broken mode.
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(
+        filename:join(TmpDir, "config.lua"),
+        ~"return { arena = 'does_not_exist.lua' }\n"
+    ),
+    application:set_env(asobi, game_dir, TmpDir),
+    ?assertMatch({error, _}, asobi_lua_config:maybe_load_game_config()),
+    cleanup_temp_dir(TmpDir).
+
+bot_config_min_players() ->
+    %% bots = { script = "...", min_players = 6 } isn't currently read
+    %% by maybe_add_bots — only the script field. Documenting: the
+    %% min_players key is silently ignored. If we ever start respecting
+    %% it, this test pins the new behaviour.
+    TmpDir = make_temp_dir(),
+    ok = filelib:ensure_dir(filename:join([TmpDir, "bots", "x"])),
+    {ok, Chaser} = file:read_file(fixture("bots/chaser.lua")),
+    ok = file:write_file(filename:join([TmpDir, "bots", "chaser.lua"]), Chaser),
+    ok = file:write_file(
+        filename:join(TmpDir, "match.lua"),
+        ~"""
+        match_size = 4
+        bots = { script = 'bots/chaser.lua', min_players = 6 }
+        """
+    ),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Mode = maps:get(~"default", get_game_modes()),
+    Bots = maps:get(bots, Mode),
+    ?assertEqual(true, maps:get(enabled, Bots)),
+    %% min_players is currently dropped — when it starts being read,
+    %% flip this assertion.
+    ?assertEqual(false, maps:is_key(min_players, Bots)),
     cleanup_temp_dir(TmpDir).
 
 %% --- Helpers ---

@@ -39,3 +39,18 @@ Either of these channels work:
 - The hosted asobi.dev SaaS — see https://asobi.dev/security
 - The `asobi` library — report to https://github.com/widgrensit/asobi/security
 - Third-party dependencies (Luerl etc.) — please report upstream
+
+## Security architecture
+
+Engineering documentation about the sandbox, trust assumptions, and known
+limitations is published as part of the project guides:
+
+- [Sandbox model](guides/security-sandbox.md) — what's stripped, what's
+  replaced, per-callback timeouts, cross-script isolation, atom-table
+  protection.
+- [Trust model](guides/security-trust-model.md) — what asobi_lua treats
+  as trusted vs. untrusted, plus verified negative results from prior
+  audits.
+- [Known limitations](guides/security-known-limitations.md) — the
+  resource-exhaustion and rollback gaps that the sandbox does **not**
+  close, with operator-facing mitigations.
