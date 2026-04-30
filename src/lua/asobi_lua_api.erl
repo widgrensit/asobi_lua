@@ -726,9 +726,20 @@ deep_decode(L, D) when is_list(L) ->
 deep_decode(V, _D) ->
     V.
 
--spec decode_to_map(term(), dynamic()) -> term().
+-spec decode_to_map(term(), dynamic()) -> map().
 decode_to_map(Term, LuaSt) ->
-    deep_decode(luerl:decode(Term, LuaSt)).
+    case deep_decode(luerl:decode(Term, LuaSt)) of
+        M when is_map(M) ->
+            M;
+        [] ->
+            #{};
+        L when is_list(L) ->
+            logger:warning(#{
+                msg => ~"asobi_lua decode_to_map: expected map, got list — coercing to #{}",
+                length => length(L)
+            }),
+            #{}
+    end.
 
 %% --- Leaderboard encoding ---
 

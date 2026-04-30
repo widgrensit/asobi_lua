@@ -88,12 +88,9 @@ ascii_binary_nonempty() ->
 round_trips(Term) ->
     {ok, St} = asobi_lua_loader:new(fixture_path("test_match.lua")),
     {Enc, St1} = luerl:encode(Term, St),
-    Decoded = asobi_lua_api:decode_to_map(Enc, St1),
-    %% Round-trip the decoded value once more — encoding from Erlang
-    %% native and decoding back must be idempotent shape-wise.
+    Decoded = asobi_lua_api:deep_decode(luerl:decode(Enc, St1)),
     {Enc2, St2} = luerl:encode(Decoded, St1),
-    Decoded2 = asobi_lua_api:decode_to_map(Enc2, St2),
-    %% deep_decode normalises both passes to the same shape.
+    Decoded2 = asobi_lua_api:deep_decode(luerl:decode(Enc2, St2)),
     Decoded =:= Decoded2.
 
 %% --- Helpers ---
