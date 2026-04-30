@@ -252,8 +252,10 @@ fun_lb_submit() ->
             [BoardId, PlayerId, Score] when
                 is_binary(BoardId), is_binary(PlayerId), is_number(Score)
             ->
-                asobi_leaderboard_server:submit(BoardId, PlayerId, trunc(Score)),
-                {[true], St};
+                case asobi_leaderboard_server:submit(BoardId, PlayerId, trunc(Score)) of
+                    ok -> {[true], St};
+                    {error, _Reason} -> {[false], St}
+                end;
             _ ->
                 error_result(~"submit requires (board_id, player_id, score)", St)
         end
