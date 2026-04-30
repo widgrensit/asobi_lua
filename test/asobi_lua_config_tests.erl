@@ -54,7 +54,9 @@ config_test_() ->
             {"config.lua returning non-table errors", fun config_returns_non_table/0},
             {"config.lua referencing missing match script errors",
                 fun config_missing_match_script/0},
-            {"bot_config table with min_players is forwarded", fun bot_config_min_players/0}
+            {"bot_config table with min_players is forwarded", fun bot_config_min_players/0},
+            {"world dimension globals (tick_rate/grid_size/zone_size/view_radius/persistent)",
+                fun world_dimension_globals_forwarded/0}
         ]}.
 
 single_mode_loads_globals() ->
@@ -340,6 +342,33 @@ bot_config_min_players() ->
     %% min_players is currently dropped — when it starts being read,
     %% flip this assertion.
     ?assertEqual(false, maps:is_key(min_players, Bots)),
+    cleanup_temp_dir(TmpDir).
+
+world_dimension_globals_forwarded() ->
+    %% tick_rate / grid_size / zone_size / view_radius / persistent must
+    %% flow from Lua globals into the mode config so
+    %% asobi_game_modes:world_config/1 picks them up. Without this, a
+    %% Lua-only world is stuck on the defaults (10x10 grid, view_radius
+    %% 1) and two random spawns can land outside each other's interest
+    %% set — the canonical "I joined but I see no one" failure.
+    TmpDir = make_temp_dir(),
+    {ok, Content} = file:read_file(fixture("config_world_dimensions.lua")),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), Content),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Mode = maps:get(~"default", get_game_modes()),
+    ?assertEqual(100, maps:get(tick_rate, Mode)),
+    ?assertEqual(1, maps:get(grid_size, Mode)),
+    ?assertEqual(1500, maps:get(zone_size, Mode)),
+    ?assertEqual(0, maps:get(view_radius, Mode)),
+    ?assertEqual(true, maps:get(persistent, Mode)),
+    %% And world_config/1 must echo them through.
+    {ok, WorldConfig} = asobi_game_modes:world_config(~"default"),
+    ?assertEqual(100, maps:get(tick_rate, WorldConfig)),
+    ?assertEqual(1, maps:get(grid_size, WorldConfig)),
+    ?assertEqual(1500, maps:get(zone_size, WorldConfig)),
+    ?assertEqual(0, maps:get(view_radius, WorldConfig)),
+    ?assertEqual(true, maps:get(persistent, WorldConfig)),
     cleanup_temp_dir(TmpDir).
 
 %% --- Helpers ---
