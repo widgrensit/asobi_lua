@@ -250,14 +250,16 @@ generate_world(Seed, Config) when is_map(Config) ->
 -spec inject_per_zone_lua(map(), file:filename_all()) -> map().
 inject_per_zone_lua(ZoneStates, ScriptPath) ->
     maps:map(
-        fun
-            (_Coords, ZoneState) when is_map(ZoneState) ->
-                case asobi_lua_loader:new(ScriptPath) of
-                    {ok, LuaSt} -> ZoneState#{lua_state => LuaSt};
-                    {error, _} -> ZoneState
-                end;
-            (_Coords, Other) ->
-                Other
+        fun(_Coords, ZoneState) ->
+            Base =
+                case ZoneState of
+                    M when is_map(M) -> M;
+                    _ -> #{}
+                end,
+            case asobi_lua_loader:new(ScriptPath) of
+                {ok, LuaSt} -> Base#{lua_state => LuaSt};
+                {error, _} -> Base
+            end
         end,
         ZoneStates
     ).

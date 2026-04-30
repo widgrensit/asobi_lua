@@ -72,6 +72,22 @@ handle_input_without_stash_is_noop_test() ->
         asobi_lua_world:handle_input(~"p1", #{~"kind" => ~"move"}, #{a => 1})
     ).
 
+generate_world_empty_zone_table_still_gets_lua_state_test() ->
+    Script = fixture("config_empty_zone_world.lua"),
+    Config = #{game_config => #{lua_script => Script}},
+    {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+    ?assert(maps:is_key({0, 0}, ZoneStates)),
+    Zone = maps:get({0, 0}, ZoneStates),
+    ?assert(is_map(Zone)),
+    ?assert(maps:is_key(lua_state, Zone)),
+
+    erlang:erase({asobi_lua_world, zone_state}),
+    {_, _} = asobi_lua_world:zone_tick(#{}, Zone),
+    Input = #{~"kind" => ~"move", ~"x" => 11, ~"y" => 22},
+    {ok, Entities1} = asobi_lua_world:handle_input(~"p1", Input, #{}),
+    ?assertMatch(#{~"p1" := #{~"x" := 11, ~"y" := 22}}, Entities1),
+    erlang:erase({asobi_lua_world, zone_state}).
+
 %% --- Direct unit tests for individual world callbacks ---
 
 init_invokes_init_callback_test() ->
