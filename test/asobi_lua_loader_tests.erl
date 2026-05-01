@@ -28,6 +28,8 @@ loader_test_() ->
         {"require loads submodule", fun require_loads_submodule/0},
         {"call with timeout succeeds", fun call_with_timeout_ok/0},
         {"call with timeout returns error on slow script", fun call_with_timeout_slow/0},
+        {"call with heap cap returns error on heap bomb", fun call_heap_bomb/0},
+        {"max_heap_words honors application env override", fun max_heap_env_override/0},
         {"math.random works", fun math_random_works/0},
         {"math.sqrt works", fun math_sqrt_works/0},
         {"math.random no args returns float", fun math_random_no_args/0}
@@ -72,6 +74,42 @@ call_with_timeout_slow() ->
     {ok, St} = asobi_lua_loader:new(fixture("slow_tick.lua")),
     Cfg = encode_map(#{}, St),
     {error, timeout} = asobi_lua_loader:call(tick, [Cfg], St, 50).
+
+%% A tick that allocates an unbounded table must be killed by the per-eval
+%% heap cap and surface as `heap_exhausted`, not as a timeout. Use a
+%% small heap budget so the eval trips quickly even on fast hardware.
+call_heap_bomb() ->
+    OldEnv = application:get_env(asobi_lua, max_heap_words),
+    application:set_env(asobi_lua, max_heap_words, 200_000),
+    try
+        {ok, St} = asobi_lua_loader:new(fixture("heap_bomb.lua")),
+        Cfg = encode_map(#{}, St),
+        ?assertEqual(
+            {error, heap_exhausted},
+            asobi_lua_loader:call(tick, [Cfg], St, 5000)
+        )
+    after
+        case OldEnv of
+            {ok, V} -> application:set_env(asobi_lua, max_heap_words, V);
+            undefined -> application:unset_env(asobi_lua, max_heap_words)
+        end
+    end.
+
+%% A normal call still succeeds when an env override is set, proving the
+%% override path is read on every eval rather than baked in once.
+max_heap_env_override() ->
+    OldEnv = application:get_env(asobi_lua, max_heap_words),
+    application:set_env(asobi_lua, max_heap_words, 5_000_000),
+    try
+        {ok, St} = asobi_lua_loader:new(fixture("test_match.lua")),
+        Cfg = encode_map(#{}, St),
+        {ok, [_ | _], _} = asobi_lua_loader:call(init, [Cfg], St, 5000)
+    after
+        case OldEnv of
+            {ok, V} -> application:set_env(asobi_lua, max_heap_words, V);
+            undefined -> application:unset_env(asobi_lua, max_heap_words)
+        end
+    end.
 
 math_random_works() ->
     {ok, St} = asobi_lua_loader:new(fixture("test_match.lua")),

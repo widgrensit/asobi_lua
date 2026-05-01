@@ -166,6 +166,23 @@ Put this behind a TLS-terminating reverse proxy (Caddy, nginx,
 Traefik) — asobi_lua speaks plain HTTP/WebSocket and expects the proxy
 to handle certificates.
 
+## Tuning knobs
+
+These are read at start time from your `sys.config`.
+
+| Key | Default | What it does |
+|---|---|---|
+| `asobi_lua.max_heap_words` | `5_000_000` | Per-eval heap cap (in Erlang words) for every Lua callback the runtime invokes. If a single eval allocates past this, the eval process is killed by the VM and the runtime returns `{error, heap_exhausted}`. Persistent state held by the gen_server is not touched — only the runaway eval. Raise only if a single tick legitimately constructs a very large local structure; long-lived tables belong in the persistent Luerl state and cost nothing per eval. |
+
+```erlang
+%% sys.config
+[
+  {asobi_lua, [
+    {max_heap_words, 10_000_000}
+  ]}
+].
+```
+
 ## Operating notes
 
 - **Database backups.** Postgres holds session tokens, world
