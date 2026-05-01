@@ -110,15 +110,15 @@ docker compose up -d
 # Register
 curl -s localhost:8080/api/v1/auth/register \
   -H 'content-type: application/json' \
-  -d '{"username":"alice","password":"hunter2"}'
-# → { "token": "eyJ...", "player_id": "01HX..." }
+  -d '{"username":"alice","password":"hunter2!"}'
+# → { "username": "alice", "player_id": "019de3...", "session_token": "wRqvop92/..." }
 
 # Queue for matchmaking
 curl -s localhost:8080/api/v1/matchmaker \
   -H 'content-type: application/json' \
-  -H 'authorization: Bearer eyJ...' \
-  -d '{"mode":"default","properties":{},"party":["01HX..."]}'
-# → { "ticket_id": "...", "status": "pending" }
+  -H 'authorization: Bearer wRqvop92/...' \
+  -d '{"mode":"default","properties":{},"party":["019de3..."]}'
+# → { "status": "pending", "ticket_id": "019de3..." }
 ```
 
 Connect the WebSocket from any SDK below and the client is live. Edit
