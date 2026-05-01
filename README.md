@@ -114,10 +114,11 @@ curl -s localhost:8080/api/v1/auth/register \
 # → { "token": "eyJ...", "player_id": "01HX..." }
 
 # Queue for matchmaking
-curl -s localhost:8080/api/v1/matchmaker/tickets \
+curl -s localhost:8080/api/v1/matchmaker \
+  -H 'content-type: application/json' \
   -H 'authorization: Bearer eyJ...' \
-  -d '{"mode":"default"}'
-# → { "ticket_id": "...", "status": "searching" }
+  -d '{"mode":"default","properties":{},"party":["01HX..."]}'
+# → { "ticket_id": "...", "status": "pending" }
 ```
 
 Connect the WebSocket from any SDK below and the client is live. Edit
