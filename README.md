@@ -199,6 +199,7 @@ per-container pricing, never CCU-based. [Learn more →](https://asobi.dev/cloud
 
 - [**Lua Scripting Guide**](guides/lua-scripting.md) — callbacks, state, modules, voting, world mode
 - [**Bot AI Guide**](guides/lua-bots.md) — write bots that fill matches
+- [**Self-hosting**](guides/self-hosting.md) — production deployment patterns: bake-into-image vs. atomic-rename live updates
 - [**asobi engine docs**](https://github.com/widgrensit/asobi#readme) — architecture, REST API, WebSocket protocol, benchmarks
 
 ## Community
