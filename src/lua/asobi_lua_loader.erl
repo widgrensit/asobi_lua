@@ -42,6 +42,16 @@ load a specific script and pin its base directory for `require`.
 %% notices the hang.
 -define(DEFAULT_INIT_TIMEOUT_MS, 2000).
 
+%% Per-eval heap cap. A correctly-written tick handler should not
+%% allocate near 40MB; legitimate large state lives in the persistent
+%% Luerl state held by the gen_server, not in the per-eval process.
+%% Configurable via `asobi_lua.max_heap_words` for ops with unusual
+%% workloads. `kill => true` makes the VM kill the eval process if it
+%% allocates past the limit; the parent receives `{'DOWN', _, _, _,
+%% killed}` and surfaces `{error, heap_exhausted}` so the caller can
+%% distinguish heap-blow from timeout.
+-define(DEFAULT_MAX_HEAP_WORDS, 5_000_000).
+
 -spec new(binary() | string()) -> {ok, dynamic()} | {error, term()}.
 new(ScriptPath) ->
     new(ScriptPath, ?DEFAULT_INIT_TIMEOUT_MS).
@@ -67,10 +77,8 @@ new(ScriptPath, TimeoutMs) ->
 -spec do_with_timeout(string() | binary(), dynamic(), non_neg_integer()) ->
     {ok, dynamic()} | {error, term()}.
 do_with_timeout(Code, St, TimeoutMs) ->
-    Self = self(),
-    Ref = make_ref(),
-    Pid = spawn(fun() ->
-        Result =
+    bounded_eval(
+        fun() ->
             try luerl:do(ensure_string(Code), St) of
                 {ok, _Results, St1} -> {ok, St1};
                 {error, Errors, _} -> {error, {lua_error, Errors}};
@@ -78,19 +86,10 @@ do_with_timeout(Code, St, TimeoutMs) ->
             catch
                 error:{lua_error, Reason, _} -> {error, {lua_error, Reason}};
                 error:Reason -> {error, Reason}
-            end,
-        Self ! {Ref, Result}
-    end),
-    receive
-        {Ref, Result} -> Result
-    after TimeoutMs ->
-        exit(Pid, kill),
-        receive
-            {Ref, _} -> ok
-        after 0 -> ok
+            end
         end,
-        {error, timeout}
-    end.
+        TimeoutMs
+    ).
 
 -spec init_sandboxed() -> dynamic().
 init_sandboxed() ->
@@ -119,23 +118,67 @@ call(FuncPath, Args, St) ->
     end.
 
 -spec call(atom() | [atom() | binary()], [term()], dynamic(), non_neg_integer()) ->
-    {ok, [term()], dynamic()} | {error, timeout | term()}.
+    {ok, [term()], dynamic()} | {error, timeout | heap_exhausted | term()}.
 call(FuncPath, Args, St, TimeoutMs) ->
+    bounded_eval(fun() -> call(FuncPath, Args, St) end, TimeoutMs).
+
+%% Spawn the work in a child with a bounded wall-clock budget AND a
+%% bounded heap, monitor it, and translate the three terminal states
+%% the parent might observe into return values:
+%%   - normal exit + {Ref, Result} message    → Result
+%%   - timeout (we kill it, exit reason `kill`) → {error, timeout}
+%%   - VM kills it for heap (exit reason `killed`) → {error, heap_exhausted}
+%% A heap kill happens *before* the worker can send {Ref, _}, so the
+%% DOWN message races. We give the message a tiny grace window in case
+%% it is in flight.
+-spec bounded_eval(fun(() -> R), non_neg_integer()) ->
+    R | {error, timeout | heap_exhausted | {worker_exit, term()}}.
+bounded_eval(Fun, TimeoutMs) ->
     Self = self(),
     Ref = make_ref(),
-    Pid = spawn(fun() ->
-        Result = call(FuncPath, Args, St),
-        Self ! {Ref, Result}
-    end),
+    SpawnOpts = [
+        monitor,
+        {max_heap_size, #{
+            size => max_heap_words(),
+            kill => true,
+            error_logger => true,
+            include_shared_binaries => false
+        }}
+    ],
+    {Pid, MonRef} =
+        spawn_opt(
+            fun() ->
+                Self ! {Ref, Fun()}
+            end,
+            SpawnOpts
+        ),
     receive
-        {Ref, Result} -> Result
+        {Ref, Result} ->
+            erlang:demonitor(MonRef, [flush]),
+            Result;
+        {'DOWN', MonRef, process, Pid, killed} ->
+            {error, heap_exhausted};
+        {'DOWN', MonRef, process, Pid, Reason} ->
+            {error, {worker_exit, Reason}}
     after TimeoutMs ->
         exit(Pid, kill),
         receive
-            {Ref, _} -> ok
-        after 0 -> ok
-        end,
-        {error, timeout}
+            {Ref, Result} ->
+                erlang:demonitor(MonRef, [flush]),
+                Result;
+            {'DOWN', MonRef, process, Pid, _} ->
+                {error, timeout}
+        after 0 ->
+            erlang:demonitor(MonRef, [flush]),
+            {error, timeout}
+        end
+    end.
+
+-spec max_heap_words() -> pos_integer().
+max_heap_words() ->
+    case application:get_env(asobi_lua, max_heap_words) of
+        {ok, N} when is_integer(N), N > 0 -> N;
+        _ -> ?DEFAULT_MAX_HEAP_WORDS
     end.
 
 %% --- Internal: state construction & sandbox ---
