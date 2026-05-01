@@ -1,5 +1,6 @@
 -module(asobi_lua_world_tests).
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("kernel/include/file.hrl").
 
 -spec fixture(string()) -> file:filename_all().
 fixture(Name) ->
@@ -388,6 +389,173 @@ on_world_recovered_threads_state_test() ->
         file:delete(Path)
     end.
 
+%% --- Hot reload tests ---
+
+hot_reload_post_tick_picks_up_global_change_test() ->
+    %% Edit a top-level global, tick post_tick, observe the new value via
+    %% get_state. World-level state holds the script + mtime; the reload runs
+    %% at the start of post_tick.
+    Path = world_temp_script(
+        ~"""
+        match_size = 1
+        max_players = 1
+        game_type = "world"
+        tag = "before"
+        function init(_) return {} end
+        function spawn_position(_, _) return { x = 0, y = 0 } end
+        function generate_world(_, _) return { ['0,0'] = {} } end
+        function zone_tick(e, z) return e, z end
+        function handle_input(_, _, e) return e end
+        function post_tick(_, s) return s end
+        function get_state(_, _) return { tag = tag } end
+        """
+    ),
+    try
+        {ok, S0} = asobi_lua_world:init(#{lua_script => Path}),
+        #{~"tag" := BeforeTag} = asobi_lua_world:get_state(~"p1", S0),
+        ?assertEqual(~"before", BeforeTag),
+
+        ok = file:write_file(
+            Path,
+            ~"""
+            match_size = 1
+            max_players = 1
+            game_type = "world"
+            tag = "after"
+            function init(_) return {} end
+            function spawn_position(_, _) return { x = 0, y = 0 } end
+            function generate_world(_, _) return { ['0,0'] = {} } end
+            function zone_tick(e, z) return e, z end
+            function handle_input(_, _, e) return e end
+            function post_tick(_, s) return s end
+            function get_state(_, _) return { tag = tag } end
+            """
+        ),
+        bump_mtime(Path),
+
+        {ok, S1} = asobi_lua_world:post_tick(1, S0),
+        #{~"tag" := AfterTag} = asobi_lua_world:get_state(~"p1", S1),
+        ?assertEqual(~"after", AfterTag)
+    after
+        file:delete(Path)
+    end.
+
+hot_reload_post_tick_survives_syntax_error_test() ->
+    %% A broken reload must not crash post_tick or wipe state. The world
+    %% keeps running on the previous (good) script, and the new mtime is
+    %% remembered so we don't re-attempt the same broken file.
+    Path = world_temp_script(
+        ~"""
+        match_size = 1
+        max_players = 1
+        game_type = "world"
+        tag = "good"
+        function init(_) return {} end
+        function spawn_position(_, _) return { x = 0, y = 0 } end
+        function generate_world(_, _) return { ['0,0'] = {} } end
+        function zone_tick(e, z) return e, z end
+        function handle_input(_, _, e) return e end
+        function post_tick(_, s) return s end
+        function get_state(_, _) return { tag = tag } end
+        """
+    ),
+    try
+        {ok, S0} = asobi_lua_world:init(#{lua_script => Path}),
+
+        ok = file:write_file(Path, ~"tag = \"broken\"  !!this is not lua"),
+        bump_mtime(Path),
+
+        {ok, S1} = asobi_lua_world:post_tick(1, S0),
+        #{~"tag" := Tag} = asobi_lua_world:get_state(~"p1", S1),
+        ?assertEqual(~"good", Tag)
+    after
+        file:delete(Path)
+    end.
+
+hot_reload_zone_tick_picks_up_global_change_test() ->
+    %% Per-zone reload: each zone holds its own lua_state + script + mtime,
+    %% and zone_tick checks the file at the start of every tick. We observe
+    %% the reload by having zone_tick stamp a global value into the entities
+    %% map (which the bridge decodes on return).
+    Path = world_temp_script(
+        ~"""
+        zone_tag = "before"
+        function init(_) return {} end
+        function spawn_position(_, _) return { x = 0, y = 0 } end
+        function generate_world(_, _) return { ['0,0'] = {} } end
+        function zone_tick(e, z)
+            e["marker"] = { tag = zone_tag }
+            return e, z
+        end
+        function handle_input(_, _, e) return e end
+        function post_tick(_, s) return s end
+        """
+    ),
+    try
+        Config = #{game_config => #{lua_script => Path}, mode => ~"test"},
+        {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+        Zone0 = maps:get({0, 0}, ZoneStates),
+        erlang:erase({asobi_lua_world, zone_state}),
+        {Ents0, Zone1} = asobi_lua_world:zone_tick(#{}, Zone0),
+        ?assertMatch(#{~"marker" := #{~"tag" := ~"before"}}, Ents0),
+
+        ok = file:write_file(
+            Path,
+            ~"""
+            zone_tag = "after"
+            function init(_) return {} end
+            function spawn_position(_, _) return { x = 0, y = 0 } end
+            function generate_world(_, _) return { ['0,0'] = {} } end
+            function zone_tick(e, z)
+                e["marker"] = { tag = zone_tag }
+                return e, z
+            end
+            function handle_input(_, _, e) return e end
+            function post_tick(_, s) return s end
+            """
+        ),
+        bump_mtime(Path),
+
+        {Ents1, _Zone2} = asobi_lua_world:zone_tick(#{}, Zone1),
+        ?assertMatch(#{~"marker" := #{~"tag" := ~"after"}}, Ents1)
+    after
+        erlang:erase({asobi_lua_world, zone_state}),
+        file:delete(Path)
+    end.
+
+hot_reload_zone_tick_survives_syntax_error_test() ->
+    Path = world_temp_script(
+        ~"""
+        zone_tag = "good"
+        function init(_) return {} end
+        function spawn_position(_, _) return { x = 0, y = 0 } end
+        function generate_world(_, _) return { ['0,0'] = {} } end
+        function zone_tick(e, z)
+            e["marker"] = { tag = zone_tag }
+            return e, z
+        end
+        function handle_input(_, _, e) return e end
+        function post_tick(_, s) return s end
+        """
+    ),
+    try
+        Config = #{game_config => #{lua_script => Path}, mode => ~"test"},
+        {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+        Zone0 = maps:get({0, 0}, ZoneStates),
+        erlang:erase({asobi_lua_world, zone_state}),
+        {_E0, Zone1} = asobi_lua_world:zone_tick(#{}, Zone0),
+
+        ok = file:write_file(Path, ~"zone_tag = \"broken\"  !!this is not lua"),
+        bump_mtime(Path),
+
+        {Ents1, _Zone2} = asobi_lua_world:zone_tick(#{}, Zone1),
+        %% The old code still runs, so the marker still says "good".
+        ?assertMatch(#{~"marker" := #{~"tag" := ~"good"}}, Ents1)
+    after
+        erlang:erase({asobi_lua_world, zone_state}),
+        file:delete(Path)
+    end.
+
 %% --- Helpers ---
 
 -spec world_temp_script(binary()) -> file:filename_all().
@@ -397,3 +565,16 @@ world_temp_script(Code) ->
     ok = filelib:ensure_dir(Path),
     ok = file:write_file(Path, Code),
     Path.
+
+-spec bump_mtime(file:filename_all()) -> ok.
+bump_mtime(Path) ->
+    %% filelib:last_modified/1 has 1-second resolution on POSIX, and
+    %% file:write_file updates mtime to the current second which can equal
+    %% the init-time mtime. Nudge mtime forward by 2 seconds so the reload
+    %% check fires deterministically.
+    {ok, FI} = file:read_file_info(Path, [{time, local}]),
+    {{Y, M, D}, {H, Mi, S}} = FI#file_info.mtime,
+    NewMtime = calendar:gregorian_seconds_to_datetime(
+        calendar:datetime_to_gregorian_seconds({{Y, M, D}, {H, Mi, S}}) + 2
+    ),
+    ok = file:write_file_info(Path, FI#file_info{mtime = NewMtime}).

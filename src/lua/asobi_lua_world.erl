@@ -74,7 +74,12 @@ init(Config) ->
             {EncConfig, LuaSt1} = luerl:encode(GameConfig, LuaSt0a),
             case asobi_lua_loader:call(init, [EncConfig], LuaSt1, ?INIT_TIMEOUT) of
                 {ok, [GameState | _], LuaSt2} ->
-                    {ok, #{lua_state => LuaSt2, game_state => GameState, script => ScriptPath}};
+                    {ok, #{
+                        lua_state => LuaSt2,
+                        game_state => GameState,
+                        script => ScriptPath,
+                        script_mtime => filelib:last_modified(ScriptPath)
+                    }};
                 {ok, [], _} ->
                     logger:error(#{
                         msg => ~"asobi_lua_world init: lua init() returned no value",
@@ -139,11 +144,15 @@ spawn_position(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
 -spec zone_tick(map(), term()) -> {map(), term()}.
 zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
     %% Pick up any lua_state updates that handle_input stashed earlier this tick.
-    ZoneState =
+    ZoneState1 =
         case erlang:get(?PD_KEY) of
             #{lua_state := LuaFromDict} -> ZoneState0#{lua_state => LuaFromDict};
             _ -> ZoneState0
         end,
+    %% Hot-reload the script if it changed on disk since the last tick.
+    %% Mirrors asobi_lua_match's per-tick reload — keeps live worlds in sync
+    %% with on-disk edits without restarting the zone process.
+    ZoneState = asobi_lua_reload:maybe_hot_reload(ZoneState1),
     Result =
         case maps:get(lua_state, ZoneState, undefined) of
             undefined ->
@@ -197,7 +206,11 @@ handle_input(PlayerId, Input, Entities) ->
 
 -spec post_tick(non_neg_integer(), map()) ->
     {ok, map()} | {vote, map(), map()} | {finished, map(), map()}.
-post_tick(TickN, #{lua_state := LuaSt, game_state := GS} = State) ->
+post_tick(TickN, State0) ->
+    %% Hot-reload the world-level script (separate from per-zone reload in
+    %% zone_tick). Reloading at world level keeps phases, post_tick, and
+    %% on_phase_* callbacks in sync with on-disk edits.
+    #{lua_state := LuaSt, game_state := GS} = State = asobi_lua_reload:maybe_hot_reload(State0),
     case asobi_lua_loader:call(post_tick, [TickN, GS], LuaSt, ?TICK_TIMEOUT) of
         {ok, [GS1 | _], LuaSt1} ->
             State1 = State#{lua_state => LuaSt1, game_state => GS1},
@@ -249,6 +262,7 @@ generate_world(Seed, Config) when is_map(Config) ->
 
 -spec inject_per_zone_lua(map(), file:filename_all()) -> map().
 inject_per_zone_lua(ZoneStates, ScriptPath) ->
+    Mtime = filelib:last_modified(ScriptPath),
     maps:map(
         fun(_Coords, ZoneState) ->
             Base =
@@ -257,8 +271,14 @@ inject_per_zone_lua(ZoneStates, ScriptPath) ->
                     _ -> #{}
                 end,
             case asobi_lua_loader:new(ScriptPath) of
-                {ok, LuaSt} -> Base#{lua_state => LuaSt};
-                {error, _} -> Base
+                {ok, LuaSt} ->
+                    Base#{
+                        lua_state => LuaSt,
+                        script => ScriptPath,
+                        script_mtime => Mtime
+                    };
+                {error, _} ->
+                    Base
             end
         end,
         ZoneStates

@@ -138,7 +138,7 @@ handle_input(PlayerId, Input, #{lua_state := LuaSt, game_state := GS} = State) -
 
 -spec tick(map()) -> {ok, map()} | {finished, map(), map()}.
 tick(State0) ->
-    #{lua_state := LuaSt, game_state := GS} = State = maybe_hot_reload(State0),
+    #{lua_state := LuaSt, game_state := GS} = State = asobi_lua_reload:maybe_hot_reload(State0),
     case asobi_lua_loader:call(tick, [GS], LuaSt, ?TICK_TIMEOUT) of
         {ok, [GS1 | _], LuaSt1} ->
             case is_finished(GS1, LuaSt1) of
@@ -208,78 +208,6 @@ is_finished(GS, LuaSt) ->
     catch
         _:_ -> false
     end.
-
-%% --- Hot reload ---
-%%
-%% Called at the start of every tick. If the match's source .lua file on
-%% disk has been modified since the last check, re-execute the script body
-%% against the current Luerl state. This re-declares globals and functions
-%% in place — `cube_color = "#4facfe"` at the top of match.lua updates the
-%% live global, and the next call to `get_state/2` sees the new value.
-%%
-%% Design notes:
-%% - Lua-side match state (players, tick counters, etc.) lives inside the
-%%   Luerl state so re-running the script preserves it — the script body
-%%   only reassigns globals and redefines functions, it doesn't touch
-%%   previously-set local variables or table fields unless you explicitly
-%%   re-run `init()`.
-%% - Erlang-side match state (#{game_state, ...}) is untouched.
-%% - If the new script has a syntax error, we log a warning, remember the
-%%   new mtime (so we don't keep retrying), and keep running the old code
-%%   until the file is fixed.
--spec maybe_hot_reload(map()) -> map().
-maybe_hot_reload(#{script := Path, script_mtime := OldMtime, lua_state := LuaSt} = State) ->
-    case filelib:last_modified(Path) of
-        0 ->
-            State;
-        OldMtime ->
-            State;
-        NewMtime ->
-            case reload_script(Path, LuaSt) of
-                {ok, NewLuaSt} ->
-                    logger:notice(#{
-                        msg => ~"lua hot reload", script => Path, mtime => NewMtime
-                    }),
-                    State#{lua_state => NewLuaSt, script_mtime => NewMtime};
-                {error, Reason} ->
-                    logger:warning(#{
-                        msg => ~"lua hot reload failed",
-                        script => Path,
-                        reason => Reason
-                    }),
-                    State#{script_mtime => NewMtime}
-            end
-    end;
-maybe_hot_reload(State) ->
-    %% Legacy state from a match created before hot-reload shipped — skip.
-    State.
-
-%% H-1: hot-reload runs *script-author* code under no wall-clock budget
-%% on the match gen_server. A `while true do end` in the file body
-%% would otherwise hang the match forever the moment its mtime ticked.
-%% 50× per-callback budget = generous for a real reload, short enough
-%% for an operator to notice the hang.
--define(RELOAD_TIMEOUT_MS, 5000).
-
--spec reload_script(file:filename_all(), dynamic()) -> {ok, dynamic()} | {error, term()}.
-reload_script(Path, LuaSt) ->
-    case file:read_file(Path) of
-        {ok, Code} ->
-            %% Clear the asobi_lua require cache so any `require("foo")`
-            %% that runs after the reload re-reads `foo.lua` from disk.
-            %% Without this, modifications to required modules (e.g.
-            %% `boons.lua`) would be invisible until the match restarts.
-            CleanLuaSt = clear_require_cache(LuaSt),
-            asobi_lua_loader:do_with_timeout(Code, CleanLuaSt, ?RELOAD_TIMEOUT_MS);
-        {error, FileReason} ->
-            {error, {file_error, FileReason}}
-    end.
-
--spec clear_require_cache(dynamic()) -> dynamic().
-clear_require_cache(LuaSt) ->
-    {Empty, LuaSt1} = luerl:encode(#{}, LuaSt),
-    {ok, LuaSt2} = luerl:set_table_keys([~"_ASOBI_LOADED"], Empty, LuaSt1),
-    LuaSt2.
 
 decode_to_map(Term, LuaSt) ->
     asobi_lua_api:decode_to_map(Term, LuaSt).
