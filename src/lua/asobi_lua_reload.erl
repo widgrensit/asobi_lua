@@ -19,6 +19,35 @@ Behaviour:
   old code until the file is fixed.
 - The `_ASOBI_LOADED` require cache is cleared so transitive `require()`d
   modules also re-read from disk.
+
+## Deployment-mode notes
+
+This is a **filesystem-mtime** primitive. It assumes the script lives at a
+path the BEAM can `stat()`, and that "the script has changed" can be
+expressed as a new mtime. Two real-world deployment models fit that:
+
+- **Local dev** — Lua files mounted via a Docker bind mount or sitting under
+  `/app/game/` directly. Edit-save triggers a reload on the next tick.
+- **Self-hosted prod with a host-volume mount** — operator's CI/CD writes
+  new files into the mounted directory (best practice: write to a temp file
+  and `mv` for atomic swap). The next tick picks them up.
+
+Two deployment models do NOT use this primitive at runtime, by design:
+
+- **Sealed-bundle prod** (e.g. asobi managed cloud) — the bundle is
+  extracted once at boot to an immutable directory; mtime never changes
+  within a container's lifetime. New deploys are container restarts on a
+  new generation. The per-tick `stat()` is a no-op in this model.
+- **Custom script sources** (DB, S3, git, etc.) — these belong behind the
+  planned `asobi_lua_source` behaviour, which will dispatch to either this
+  filesystem implementation or an alternative loader. Until then, custom
+  sources should arrange for files to land on disk and use this primitive,
+  or implement reload outside it.
+
+Operators running self-hosted with high zone counts who want to suppress
+per-tick stat overhead should track the planned `ASOBI_LUA_RELOAD` config
+(future): `auto` (default, mtime-poll), `signal` (only on explicit reload
+RPC), `off` (immutable; require restart for code changes).
 """.
 
 -export([maybe_hot_reload/1]).
