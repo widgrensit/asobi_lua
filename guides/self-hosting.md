@@ -173,15 +173,34 @@ These are read at start time from your `sys.config`.
 | Key | Default | What it does |
 |---|---|---|
 | `asobi_lua.max_heap_words` | `5_000_000` | Per-eval heap cap (in Erlang words) for every Lua callback the runtime invokes. If a single eval allocates past this, the eval process is killed by the VM and the runtime returns `{error, heap_exhausted}`. Persistent state held by the gen_server is not touched — only the runaway eval. Raise only if a single tick legitimately constructs a very large local structure; long-lived tables belong in the persistent Luerl state and cost nothing per eval. |
+| `asobi_lua.reload_mode` (or env `ASOBI_LUA_RELOAD`) | `auto` | `auto` mtime-polls the script on every tick. `off` skips the poll entirely — appropriate for sealed-bundle prod where new code is a container restart, not a file change. Anything we don't recognise falls back to `auto` so a typo doesn't silently disable reload. |
 
 ```erlang
 %% sys.config
 [
   {asobi_lua, [
-    {max_heap_words, 10_000_000}
+    {max_heap_words, 10_000_000},
+    {reload_mode, off}
   ]}
 ].
 ```
+
+Or, in a Docker deploy, just set `ASOBI_LUA_RELOAD=off` in the container env.
+
+## Validating Lua scripts in CI
+
+Before deploying a new `match.lua` or `world.lua`, run it through the
+loader in CI to catch syntax errors and sandbox violations without
+booting a full runtime:
+
+```bash
+docker run --rm -v "$PWD/lua:/g" ghcr.io/widgrensit/asobi_lua \
+  bin/asobi_lua eval 'asobi_lua_validate:cli(["/g/match.lua"]).'
+```
+
+Exits 0 on a clean script, 1 with the loader's error reason on stderr
+otherwise. Pass multiple paths to validate them sequentially; the run
+exits on the first failure.
 
 ## Operating notes
 

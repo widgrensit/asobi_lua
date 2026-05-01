@@ -45,9 +45,13 @@ Two deployment models do NOT use this primitive at runtime, by design:
   or implement reload outside it.
 
 Operators running self-hosted with high zone counts who want to suppress
-per-tick stat overhead should track the planned `ASOBI_LUA_RELOAD` config
-(future): `auto` (default, mtime-poll), `signal` (only on explicit reload
-RPC), `off` (immutable; require restart for code changes).
+per-tick stat overhead can set `asobi_lua.reload_mode` (or the
+`ASOBI_LUA_RELOAD` env var the release script reads) to:
+
+- `auto` (default) — mtime-poll every tick. Suitable for dev and
+  self-hosted volume-mount setups.
+- `off` — never reload. Suitable for sealed-bundle prod where code
+  changes are container restarts. The per-tick `stat()` is skipped.
 """.
 
 -export([maybe_hot_reload/1]).
@@ -58,7 +62,14 @@ RPC), `off` (immutable; require restart for code changes).
 -define(RELOAD_TIMEOUT_MS, 5000).
 
 -spec maybe_hot_reload(map()) -> map().
-maybe_hot_reload(#{script := Path, script_mtime := OldMtime, lua_state := LuaSt} = State) ->
+maybe_hot_reload(State) ->
+    case reload_mode() of
+        off -> State;
+        auto -> do_maybe_reload(State)
+    end.
+
+-spec do_maybe_reload(map()) -> map().
+do_maybe_reload(#{script := Path, script_mtime := OldMtime, lua_state := LuaSt} = State) ->
     case filelib:last_modified(Path) of
         0 ->
             State;
@@ -80,9 +91,29 @@ maybe_hot_reload(#{script := Path, script_mtime := OldMtime, lua_state := LuaSt}
                     State#{script_mtime => NewMtime}
             end
     end;
-maybe_hot_reload(State) ->
+do_maybe_reload(State) ->
     %% Legacy state from before hot-reload shipped — nothing to compare.
     State.
+
+%% Reads `asobi_lua.reload_mode` first; falls back to the `ASOBI_LUA_RELOAD`
+%% OS env var so operators can flip the dial without editing sys.config in a
+%% container deploy. Anything we don't recognise is treated as `auto` so a
+%% typo doesn't silently disable reload.
+-spec reload_mode() -> auto | off.
+reload_mode() ->
+    case application:get_env(asobi_lua, reload_mode) of
+        {ok, off} -> off;
+        {ok, auto} -> auto;
+        _ -> from_os_env()
+    end.
+
+-spec from_os_env() -> auto | off.
+from_os_env() ->
+    case os:getenv("ASOBI_LUA_RELOAD") of
+        "off" -> off;
+        "OFF" -> off;
+        _ -> auto
+    end.
 
 -spec reload_script(file:filename_all(), dynamic()) -> {ok, dynamic()} | {error, term()}.
 reload_script(Path, LuaSt) ->
