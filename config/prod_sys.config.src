@@ -41,7 +41,8 @@
         {database, "${ASOBI_DB_NAME}"},
         {user, "${ASOBI_DB_USER}"},
         {password, "${ASOBI_DB_PASSWORD}"},
-        {pool_size, 10}
+        {pool_size, 10},
+        {socket_options, [${ASOBI_DB_SOCKET_OPTS}]}
     ]},
     {asobi, [
         {game_dir, "/app/game"}
