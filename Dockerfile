@@ -47,5 +47,9 @@ ENV ASOBI_PORT=8080 \
     ASOBI_DB_USER=postgres \
     ASOBI_DB_PASSWORD=postgres
 
+# Erlang term fragment spliced into kura's socket_options list.
+# Default forces IPv4; set to "inet6" for IPv6-only Postgres networks.
+ENV ASOBI_DB_SOCKET_OPTS=inet
+
 ENTRYPOINT ["tini", "--"]
 CMD ["bin/asobi_lua", "foreground"]
