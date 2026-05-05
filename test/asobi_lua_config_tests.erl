@@ -51,6 +51,10 @@ config_test_() ->
             {"match_size float is truncated then rejected", fun match_size_float_rejected/0},
             {"unknown strategy is preserved as-is", fun unknown_strategy_preserved/0},
             {"strategy = skill_based is recognised", fun strategy_skill_based/0},
+            {"state_strategy = shared resolves to asobi_lua_match_shared",
+                fun state_strategy_shared/0},
+            {"state_strategy absent resolves to asobi_lua_match", fun state_strategy_absent/0},
+            {"state_strategy = unknown is ignored", fun state_strategy_unknown/0},
             {"config.lua returning non-table errors", fun config_returns_non_table/0},
             {"config.lua referencing missing match script errors",
                 fun config_missing_match_script/0},
@@ -296,6 +300,46 @@ strategy_skill_based() ->
     ok = asobi_lua_config:maybe_load_game_config(),
     Mode = maps:get(~"default", get_game_modes()),
     ?assertEqual(skill_based, maps:get(strategy, Mode)),
+    cleanup_temp_dir(TmpDir).
+
+state_strategy_shared() ->
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(
+        filename:join(TmpDir, "match.lua"),
+        ~"match_size = 2\nstate_strategy = 'shared'\n"
+    ),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Mode = maps:get(~"default", get_game_modes()),
+    ?assertEqual(shared, maps:get(state_strategy, Mode)),
+    {ok, GameMod, _} = asobi_game_modes:resolve_game_module(~"default"),
+    ?assertEqual(asobi_lua_match_shared, GameMod),
+    cleanup_temp_dir(TmpDir).
+
+state_strategy_absent() ->
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(
+        filename:join(TmpDir, "match.lua"),
+        ~"match_size = 2\n"
+    ),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Mode = maps:get(~"default", get_game_modes()),
+    ?assertNot(maps:is_key(state_strategy, Mode)),
+    {ok, GameMod, _} = asobi_game_modes:resolve_game_module(~"default"),
+    ?assertEqual(asobi_lua_match, GameMod),
+    cleanup_temp_dir(TmpDir).
+
+state_strategy_unknown() ->
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(
+        filename:join(TmpDir, "match.lua"),
+        ~"match_size = 2\nstate_strategy = 'totally_made_up'\n"
+    ),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    Mode = maps:get(~"default", get_game_modes()),
+    ?assertNot(maps:is_key(state_strategy, Mode)),
     cleanup_temp_dir(TmpDir).
 
 config_returns_non_table() ->

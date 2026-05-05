@@ -26,11 +26,12 @@ configure via `sys.config` are unaffected).
 ## Match script globals
 
 ```lua
-match_size   = 4                          -- required, positive integer
-max_players  = 10                         -- optional, defaults to match_size
-strategy     = "fill"                     -- optional, "fill" | "skill_based"
-bots         = { script = "bots/ai.lua" } -- optional
-game_type    = "world"                    -- optional, "match" (default) or "world"
+match_size     = 4                          -- required, positive integer
+max_players    = 10                         -- optional, defaults to match_size
+strategy       = "fill"                     -- optional, "fill" | "skill_based"
+bots           = { script = "bots/ai.lua" } -- optional
+game_type      = "world"                    -- optional, "match" (default) or "world"
+state_strategy = "shared"                   -- optional, "shared" picks asobi_lua_match_shared (encode-once broadcast)
 
 -- World mode config (large session games, game_type = "world"):
 tick_rate               = 50              -- optional, ms per world tick (default 50 = 20 Hz)
@@ -146,6 +147,7 @@ read_match_globals(ScriptPath, St) ->
     Strategy = read_global_string(~"strategy", St),
     Bots = read_global_table(~"bots", St),
     GameType = read_global_string(~"game_type", St),
+    StateStrategy = read_global_string(~"state_strategy", St),
     TickRate = read_global_int(~"tick_rate", St),
     GridSize = read_global_int(~"grid_size", St),
     ZoneSize = read_global_int(~"zone_size", St),
@@ -173,7 +175,8 @@ read_match_globals(ScriptPath, St) ->
             },
             Config1 = maybe_add_game_type(Config0, GameType),
             Config2 = maybe_add_strategy(Config1, Strategy),
-            Config3 = maybe_add_bots(Config2, Bots, ScriptPath),
+            Config2a = maybe_add_state_strategy(Config2, StateStrategy),
+            Config3 = maybe_add_bots(Config2a, Bots, ScriptPath),
             Config4 = maybe_add_zone_config(Config3, LazyZones, ZoneIdleTimeout, MaxActiveZones),
             Config5 = maybe_add_int(Config4, spatial_grid_cell_size, SpatialGridCellSize),
             Config6 = maybe_add_int(Config5, cold_tick_divisor, ColdTickDivisor),
@@ -202,6 +205,15 @@ maybe_add_strategy(Config, Strategy) ->
         ~"skill_based" -> Config#{strategy => skill_based};
         Other -> Config#{strategy => Other}
     end.
+
+%% A shared `get_state(state)` payload is broadcast pre-encoded once per
+%% tick instead of re-encoded per player. Set `state_strategy = "shared"`
+%% in the match script when every player sees the same world (the
+%% common case for action games / shared-arena modes).
+maybe_add_state_strategy(Config, ~"shared") ->
+    Config#{state_strategy => shared};
+maybe_add_state_strategy(Config, _) ->
+    Config.
 
 maybe_add_zone_config(Config, LazyZones, ZoneIdleTimeout, MaxActiveZones) ->
     Config1 =
