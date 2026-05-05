@@ -41,17 +41,23 @@ plan() ->
 op() ->
     proper_types:oneof([
         {tick},
-        {tick_crash, crash_mode()},
-        {input, player(), proper_types:oneof([clean, crash_mode()])}
+        {tick_crash, tick_crash_mode()},
+        {input, player(), proper_types:oneof([clean, input_crash_mode()])}
     ]).
 
-crash_mode() ->
-    %% `infinite_loop` exercises the bridge's per-callback timeout
-    %% wrapping (zone_tick/handle_input both run under TICK_TIMEOUT /
-    %% INPUT_TIMEOUT). Without this entry, the fixture's infinite-loop
-    %% branch was unreachable from the property — see error_world.lua:23.
+%% zone_tick still runs under bounded_eval (TICK_TIMEOUT) so infinite_loop
+%% is contained.
+tick_crash_mode() ->
     proper_types:elements([
         ~"error", ~"type_error", ~"arith_error", ~"stack_overflow", ~"infinite_loop"
+    ]).
+
+%% handle_input intentionally has no wall-clock budget per ADR 0002, so
+%% `infinite_loop` is excluded from the input crash modes — feeding it
+%% would actually wedge the property runner.
+input_crash_mode() ->
+    proper_types:elements([
+        ~"error", ~"type_error", ~"arith_error", ~"stack_overflow"
     ]).
 
 player() ->

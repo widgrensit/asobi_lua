@@ -45,7 +45,6 @@ function vote_resolved(template, result, state) -- return updated state
 %% get the least because they run hundreds of times per second.
 -define(INIT_TIMEOUT, 1000).
 -define(TICK_TIMEOUT, 500).
--define(INPUT_TIMEOUT, 100).
 -define(JOIN_TIMEOUT, 200).
 -define(LEAVE_TIMEOUT, 200).
 -define(GET_STATE_TIMEOUT, 100).
@@ -126,7 +125,9 @@ leave(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
 -spec handle_input(binary(), map(), map()) -> {ok, map()}.
 handle_input(PlayerId, Input, #{lua_state := LuaSt, game_state := GS} = State) ->
     {EncInput, LuaSt1} = luerl:encode(Input, LuaSt),
-    case asobi_lua_loader:call(handle_input, [PlayerId, EncInput, GS], LuaSt1, ?INPUT_TIMEOUT) of
+    %% No bounded_eval: the per-input spawn dominates real Lua work at
+    %% high input rates. tick/1 still spawn-isolates. See ADR 0002.
+    case asobi_lua_loader:call(handle_input, [PlayerId, EncInput, GS], LuaSt1) of
         {ok, [GS1 | _], LuaSt2} ->
             {ok, State#{lua_state => LuaSt2, game_state => GS1}};
         {error, Reason} ->
