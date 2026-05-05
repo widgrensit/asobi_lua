@@ -1,11 +1,12 @@
 -module(asobi_lua_resource_limits_tests).
 -include_lib("eunit/include/eunit.hrl").
 
-%% Resource-limit tests: every Lua callback runs in a child process
-%% with a wall-clock budget so a runaway script can't wedge the
-%% calling gen_server. We assert that wedging callbacks (infinite
-%% loops, deep recursion, huge allocations) terminate within a known
-%% bound and the parent stays responsive.
+%% Resource-limit tests: every Lua callback EXCEPT handle_input runs in
+%% a child process with a wall-clock budget. handle_input is hot-path
+%% (2k+ inputs/sec at scale) and the spawn cost dominated real work; per
+%% ADR 0002 it now runs directly. tick/init/get_state/join/leave still
+%% spawn-isolate. We assert that the wrapped callbacks terminate within
+%% a known bound, AND that handle_input does NOT (intentionally).
 
 -spec fixture(string()) -> file:filename_all().
 fixture(Name) ->
@@ -85,7 +86,52 @@ match_init_timeout_test() ->
         end,
     ?assertNotEqual({timeout_blocked}, Result).
 
-match_handle_input_timeout_test() ->
+world_handle_input_no_wall_clock_timeout_test() ->
+    %% Same contract as the match bridge — see ADR 0002. World's
+    %% handle_input runs directly in the calling process; an
+    %% infinite-loop input does not self-terminate.
+    Path = temp_script(
+        ~"""
+        match_size = 1
+        game_type = "world"
+        function init(_) return {} end
+        function generate_world(_, _) return { ["0,0"] = {} } end
+        function on_zone_loaded(_, _, s) return s, {} end
+        function zone_tick(ents, s) return ents, s end
+        function handle_input(_, _, _) while true do end end
+        """
+    ),
+    Config = #{game_config => #{lua_script => Path}},
+    {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+    Zone0 = maps:get({0, 0}, ZoneStates),
+    Self = self(),
+    %% Process dictionary doesn't inherit across spawns — set it inside
+    %% the child so handle_input enters the Lua call path.
+    {Pid, Ref} = spawn_monitor(fun() ->
+        erlang:put({asobi_lua_world, zone_state}, Zone0),
+        Result = asobi_lua_world:handle_input(~"p1", #{~"x" => 1}, #{}),
+        Self ! {result, Result}
+    end),
+    receive
+        {result, _} ->
+            ?assert(false, "world handle_input must not self-terminate; ADR 0002")
+    after 500 ->
+        ?assert(is_process_alive(Pid)),
+        exit(Pid, kill),
+        receive
+            {'DOWN', Ref, process, Pid, _} -> ok
+        after 1000 ->
+            ok
+        end
+    end.
+
+match_handle_input_no_wall_clock_timeout_test() ->
+    %% Per ADR 0002, handle_input intentionally has NO wall-clock budget.
+    %% spawn-overhead at 2k inputs/sec dominated real Lua work, so the
+    %% input path runs directly in the calling process. The trade is
+    %% explicit: a runaway handle_input now hangs the match server until
+    %% its gen_server timeout trips. This test pins the new contract:
+    %% an infinite-loop handle_input does NOT return on its own.
     Path = temp_script(
         ~"""
         match_size = 1
@@ -99,20 +145,22 @@ match_handle_input_timeout_test() ->
     ),
     {ok, S0} = asobi_lua_match:init(#{lua_script => Path}),
     Self = self(),
-    Pid = spawn(fun() ->
+    {Pid, Ref} = spawn_monitor(fun() ->
         Result = asobi_lua_match:handle_input(~"p1", #{~"x" => 1}, S0),
         Self ! {result, Result}
     end),
-    Result =
+    receive
+        {result, _} ->
+            ?assert(false, "handle_input must not self-terminate; ADR 0002 removed bounded_eval")
+    after 500 ->
+        ?assert(is_process_alive(Pid)),
+        exit(Pid, kill),
         receive
-            {result, R} -> R
-        after 3000 ->
-            exit(Pid, kill),
-            timeout_blocked
-        end,
-    ?assertNotEqual(timeout_blocked, Result),
-    %% bridge swallows the timeout error and returns {ok, State}
-    ?assertMatch({ok, _}, Result).
+            {'DOWN', Ref, process, Pid, _} -> ok
+        after 1000 ->
+            ok
+        end
+    end.
 
 match_get_state_timeout_test() ->
     Path = temp_script(

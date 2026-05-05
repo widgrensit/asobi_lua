@@ -45,7 +45,6 @@ function on_zone_unloaded(cx, cy, state)     -- return state
 -define(INIT_TIMEOUT, 2000).
 -define(GENERATE_TIMEOUT, 5000).
 -define(TICK_TIMEOUT, 500).
--define(INPUT_TIMEOUT, 100).
 -define(JOIN_TIMEOUT, 200).
 -define(LEAVE_TIMEOUT, 200).
 -define(GET_STATE_TIMEOUT, 100).
@@ -188,9 +187,10 @@ handle_input(PlayerId, Input, Entities) ->
         #{lua_state := LuaSt} = ZoneState ->
             {EncInput, LuaSt1} = luerl:encode(Input, LuaSt),
             {EncEntities, LuaSt2} = luerl:encode(Entities, LuaSt1),
+            %% No bounded_eval: see ADR 0002.
             case
                 asobi_lua_loader:call(
-                    handle_input, [PlayerId, EncInput, EncEntities], LuaSt2, ?INPUT_TIMEOUT
+                    handle_input, [PlayerId, EncInput, EncEntities], LuaSt2
                 )
             of
                 {ok, [Ents1 | _], LuaSt3} ->
