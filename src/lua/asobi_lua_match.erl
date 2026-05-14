@@ -35,6 +35,8 @@ function vote_resolved(template, result, state) -- return updated state
 
 -behaviour(asobi_match).
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([init/1, join/2, leave/2, handle_input/3, tick/1, get_state/2]).
 -export([vote_requested/1, vote_resolved/3]).
 
@@ -57,7 +59,7 @@ init(Config) ->
             P when is_binary(P); is_list(P) ->
                 P;
             undefined ->
-                logger:error(#{msg => ~"asobi_lua_match init: missing lua_script", config => Config}),
+                ?LOG_ERROR(#{msg => ~"asobi_lua_match init: missing lua_script", config => Config}),
                 erlang:error({missing_lua_script, Config})
         end,
     GameConfig = maps:get(game_config, Config, #{}),
@@ -80,13 +82,13 @@ init(Config) ->
                 {ok, [], _} ->
                     %% asobi_match:init/1 doesn't allow an error return; log and
                     %% crash so the supervisor handles it with full context.
-                    logger:error(#{
+                    ?LOG_ERROR(#{
                         msg => ~"asobi_lua_match init: lua init() returned no value",
                         script => ScriptPath
                     }),
                     erlang:error({lua_error, ~"init() must return a table"});
                 {error, Reason} ->
-                    logger:error(#{
+                    ?LOG_ERROR(#{
                         msg => ~"asobi_lua_match init: lua init() failed",
                         script => ScriptPath,
                         reason => Reason
@@ -94,7 +96,7 @@ init(Config) ->
                     erlang:error({lua_init_failed, Reason})
             end;
         {error, Reason} ->
-            logger:error(#{
+            ?LOG_ERROR(#{
                 msg => ~"asobi_lua_match init: lua_loader:new/1 failed",
                 script => ScriptPath,
                 reason => Reason
@@ -108,7 +110,7 @@ join(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
         {ok, [GS1 | _], LuaSt1} ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
         {error, Reason} ->
-            logger:warning(#{msg => ~"lua join error", player_id => PlayerId, reason => Reason}),
+            ?LOG_WARNING(#{msg => ~"lua join error", player_id => PlayerId, reason => Reason}),
             {error, Reason}
     end.
 
@@ -118,7 +120,7 @@ leave(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
         {ok, [GS1 | _], LuaSt1} ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
         {error, Reason} ->
-            logger:warning(#{msg => ~"lua leave error", player_id => PlayerId, reason => Reason}),
+            ?LOG_WARNING(#{msg => ~"lua leave error", player_id => PlayerId, reason => Reason}),
             {ok, State}
     end.
 
@@ -131,7 +133,7 @@ handle_input(PlayerId, Input, #{lua_state := LuaSt, game_state := GS} = State) -
         {ok, [GS1 | _], LuaSt2} ->
             {ok, State#{lua_state => LuaSt2, game_state => GS1}};
         {error, Reason} ->
-            logger:warning(#{
+            ?LOG_WARNING(#{
                 msg => ~"lua input error", player_id => PlayerId, reason => Reason
             }),
             {ok, State}
@@ -149,10 +151,10 @@ tick(State0) ->
                     {ok, State#{lua_state => LuaSt1, game_state => GS1}}
             end;
         {error, timeout} ->
-            logger:error(#{msg => ~"lua tick timeout", script => maps:get(script, State)}),
+            ?LOG_ERROR(#{msg => ~"lua tick timeout", script => maps:get(script, State)}),
             {ok, State};
         {error, Reason} ->
-            logger:error(#{msg => ~"lua tick error", reason => Reason}),
+            ?LOG_ERROR(#{msg => ~"lua tick error", reason => Reason}),
             {ok, State}
     end.
 

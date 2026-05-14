@@ -54,6 +54,8 @@ per-tick stat overhead can set `asobi_lua.reload_mode` (or the
   changes are container restarts. The per-tick `stat()` is skipped.
 """.
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([maybe_hot_reload/1]).
 
 %% Reload runs script-author code under a wall-clock budget. A `while true do
@@ -78,12 +80,12 @@ do_maybe_reload(#{script := Path, script_mtime := OldMtime, lua_state := LuaSt} 
         NewMtime ->
             case reload_script(Path, LuaSt) of
                 {ok, NewLuaSt} ->
-                    logger:notice(#{
+                    ?LOG_NOTICE(#{
                         msg => ~"lua hot reload", script => Path, mtime => NewMtime
                     }),
                     State#{lua_state => NewLuaSt, script_mtime => NewMtime};
                 {error, Reason} ->
-                    logger:warning(#{
+                    ?LOG_WARNING(#{
                         msg => ~"lua hot reload failed",
                         script => Path,
                         reason => Reason

@@ -30,6 +30,8 @@ function on_zone_unloaded(cx, cy, state)     -- return state
 
 -behaviour(asobi_world).
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([init/1, join/2, leave/2, spawn_position/2]).
 -export([zone_tick/2, handle_input/3, post_tick/2]).
 -export([generate_world/2, get_state/2]).
@@ -59,7 +61,7 @@ init(Config) ->
             P when is_binary(P); is_list(P) ->
                 P;
             undefined ->
-                logger:error(#{msg => ~"asobi_lua_world init: missing lua_script", config => Config}),
+                ?LOG_ERROR(#{msg => ~"asobi_lua_world init: missing lua_script", config => Config}),
                 erlang:error({missing_lua_script, Config})
         end,
     GameConfig = maps:get(game_config, Config, #{}),
@@ -76,13 +78,13 @@ init(Config) ->
                         script_mtime => filelib:last_modified(ScriptPath)
                     }};
                 {ok, [], _} ->
-                    logger:error(#{
+                    ?LOG_ERROR(#{
                         msg => ~"asobi_lua_world init: lua init() returned no value",
                         script => ScriptPath
                     }),
                     erlang:error({lua_error, ~"init() must return a table"});
                 {error, Reason} ->
-                    logger:error(#{
+                    ?LOG_ERROR(#{
                         msg => ~"asobi_lua_world init: lua init() failed",
                         script => ScriptPath,
                         reason => Reason
@@ -90,7 +92,7 @@ init(Config) ->
                     erlang:error({lua_init_failed, Reason})
             end;
         {error, Reason} ->
-            logger:error(#{
+            ?LOG_ERROR(#{
                 msg => ~"asobi_lua_world init: lua_loader:new/1 failed",
                 script => ScriptPath,
                 reason => Reason
@@ -251,7 +253,7 @@ generate_world(Seed, Config) when is_map(Config) ->
                     {ok, ZoneStates} = generate_world(Seed, #{lua_state => LuaSt}),
                     {ok, inject_per_zone_lua(ZoneStates, ScriptPath, PreInstall)};
                 {error, Reason} ->
-                    logger:error(#{
+                    ?LOG_ERROR(#{
                         msg =>
                             ~"asobi_lua_world generate_world: lua_loader:new failed; world will spawn with empty zones",
                         script => ScriptPath,
@@ -425,7 +427,7 @@ decode_terrain_provider(Result, LuaSt) ->
                                 end,
                             {Mod, ProvArgs};
                         not_allowed ->
-                            logger:warning(#{
+                            ?LOG_WARNING(#{
                                 msg => ~"terrain_provider_not_allowed",
                                 requested => ModBin
                             }),
@@ -471,7 +473,7 @@ log_lua_error(Callback, Reason, StateOrZoneState) ->
             timeout -> ~"timeout";
             _ -> ~"error"
         end,
-    logger:warning(#{
+    ?LOG_WARNING(#{
         msg => ~"lua callback failed",
         callback => Callback,
         severity => Severity,
@@ -559,7 +561,7 @@ decode_phases(PhasesRef, LuaSt) ->
             %% type helps the developer notice it; without this, decode silently
             %% returned [], the world server treated it as "no phases", and the
             %% mismatch only surfaced as runtime weirdness much later.
-            logger:warning(#{
+            ?LOG_WARNING(#{
                 msg => ~"asobi_lua_world: phases() returned non-list, ignoring",
                 got_type => type_of(Other)
             }),
