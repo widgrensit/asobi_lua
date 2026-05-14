@@ -63,6 +63,8 @@ game.terrain.preload(coords_list)                -- preload chunks async
 ```
 """.
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([install/2]).
 -export([deep_decode/1, decode_to_map/2]).
 
@@ -734,7 +736,7 @@ decode_to_map(Term, LuaSt) ->
         [] ->
             #{};
         L when is_list(L) ->
-            logger:warning(#{
+            ?LOG_WARNING(#{
                 msg => ~"asobi_lua decode_to_map: expected map, got list — coercing to #{}",
                 length => length(L)
             }),
