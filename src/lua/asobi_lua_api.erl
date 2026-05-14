@@ -65,6 +65,7 @@ game.terrain.preload(coords_list)                -- preload chunks async
 
 -export([install/2]).
 -export([deep_decode/1, decode_to_map/2]).
+-export([to_storage_value/1]).
 
 -spec install(map(), dynamic()) -> dynamic().
 install(Ctx, St0) ->
@@ -354,7 +355,7 @@ fun_storage_set() ->
     fun(Args, St) ->
         case decode_args(Args, St) of
             [Collection, Key, Value] when is_binary(Collection), is_binary(Key) ->
-                wrap_result(storage_set(Collection, Key, undefined, to_map(Value)), St);
+                wrap_result(storage_set(Collection, Key, undefined, to_storage_value(Value)), St);
             _ ->
                 error_result(~"set requires (collection, key, value)", St)
         end
@@ -378,7 +379,7 @@ fun_storage_player_set() ->
             [PlayerId, Collection, Key, Value] when
                 is_binary(PlayerId), is_binary(Collection), is_binary(Key)
             ->
-                wrap_result(storage_set(Collection, Key, PlayerId, to_map(Value)), St);
+                wrap_result(storage_set(Collection, Key, PlayerId, to_storage_value(Value)), St);
             _ ->
                 error_result(~"player_set requires (player_id, collection, key, value)", St)
         end
@@ -612,7 +613,8 @@ fun_terrain_preload(_) ->
 
 %% --- Storage helpers ---
 
--spec storage_get(binary(), binary(), binary() | undefined) -> {ok, map()} | {error, term()}.
+-spec storage_get(binary(), binary(), binary() | undefined) ->
+    {ok, term()} | {error, term()}.
 storage_get(Collection, Key, PlayerId) ->
     Q0 = kura_query:from(asobi_storage),
     Q1 = kura_query:where(Q0, {collection, Collection}),
@@ -624,7 +626,8 @@ storage_get(Collection, Key, PlayerId) ->
         {error, _} = Err -> Err
     end.
 
--spec storage_set(binary(), binary(), binary() | undefined, map()) -> {ok, map()} | {error, term()}.
+-spec storage_set(binary(), binary(), binary() | undefined, term()) ->
+    {ok, term()} | {error, term()}.
 storage_set(Collection, Key, PlayerId, Value) ->
     case storage_get(Collection, Key, PlayerId) of
         {ok, _} ->
@@ -784,6 +787,45 @@ to_map_acc([{K, V} | T], Acc) when is_binary(K) ->
     to_map_acc(T, Acc#{K => V});
 to_map_acc([_ | T], Acc) ->
     to_map_acc(T, Acc).
+
+%% Coerce a Luerl-decoded value into a shape `asobi_storage`'s jsonb column
+%% can round-trip. Unlike `to_map/1` (which silently drops anything that
+%% isn't a map or string-keyed proplist), this preserves the JSON-compatible
+%% leaf types — numbers, binaries, booleans, nil, and array-shaped tables.
+%% Game scripts can therefore use plain scalars as storage values:
+%%
+%%   game.storage.player_set(pid, "barrow", "run_loot", 5)
+%%
+%% rather than having to wrap them as `{ n = 5 }` to avoid silent data loss.
+%% Maps and nested tables recurse so e.g. `{ position = { x = 1, y = 2 } }`
+%% round-trips intact.
+-spec to_storage_value(term()) -> term().
+to_storage_value(V) when is_number(V); is_boolean(V); is_binary(V) -> V;
+to_storage_value(nil) ->
+    nil;
+to_storage_value(V) when is_map(V) ->
+    maps:map(fun(_K, Val) -> to_storage_value(Val) end, V);
+to_storage_value([{K, _} | _] = L) when is_binary(K) ->
+    %% String-keyed proplist — Luerl's representation of `{ k = v }`.
+    maps:from_list([{Key, to_storage_value(Val)} || {Key, Val} <- L]);
+to_storage_value([]) ->
+    %% Empty Lua tables are ambiguous (could be either array or map). Round
+    %% to an empty map for parity with `to_map/1`'s prior behaviour. This
+    %% clause must come before the generic `is_list/1` clause below.
+    #{};
+to_storage_value([{K, _} | _] = L) when is_integer(K) ->
+    %% Integer-keyed proplist — Luerl's representation of `{ a, b, c }`
+    %% when handed an undecoded table.
+    [to_storage_value(Val) || {_N, Val} <- lists:sort(L)];
+to_storage_value(L) when is_list(L) ->
+    %% Plain list — `deep_decode/1` already flattens an integer-keyed
+    %% proplist into this shape, so callers passing a deep-decoded
+    %% value land here for Lua arrays.
+    [to_storage_value(V) || V <- L];
+to_storage_value(_) ->
+    %% Unsupported (Luerl function refs etc.) — surface as `nil` rather
+    %% than silently masking with an empty map.
+    nil.
 
 -spec ensure_pairs([term()]) -> [{term(), term()}].
 ensure_pairs(L) ->

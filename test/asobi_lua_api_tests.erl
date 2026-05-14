@@ -53,7 +53,14 @@ api_test_() ->
         {"game.spatial.query_rect errors without zone", fun spatial_query_rect_no_zone/0},
         {"game.terrain.get_chunk returns data", fun terrain_get_chunk/0},
         {"game.terrain.get_chunk errors without store", fun terrain_get_chunk_no_store/0},
-        {"game.terrain.preload forwards coords", fun terrain_preload/0}
+        {"game.terrain.preload forwards coords", fun terrain_preload/0},
+        {"to_storage_value preserves scalars", fun to_storage_value_scalars/0},
+        {"to_storage_value preserves maps", fun to_storage_value_maps/0},
+        {"to_storage_value preserves arrays", fun to_storage_value_arrays/0},
+        {"to_storage_value preserves nested structures", fun to_storage_value_nested/0},
+        {"player_set forwards a scalar number", fun storage_player_set_scalar/0},
+        {"player_set forwards a binary", fun storage_player_set_binary/0},
+        {"player_set forwards an array", fun storage_player_set_array/0}
     ]}.
 
 setup() ->
@@ -404,6 +411,88 @@ terrain_preload() ->
     Code = "return game.terrain.preload({ { cx = 0, cy = 0 }, { cx = 1, cy = 0 } })",
     {ok, [true | _], _} = eval(Code, St),
     ?assert(meck:called(asobi_terrain_store, preload_chunks, '_')).
+
+%% --- to_storage_value coercion ---
+
+to_storage_value_scalars() ->
+    ?assertEqual(5, asobi_lua_api:to_storage_value(5)),
+    ?assertEqual(3.14, asobi_lua_api:to_storage_value(3.14)),
+    ?assertEqual(~"hello", asobi_lua_api:to_storage_value(~"hello")),
+    ?assertEqual(true, asobi_lua_api:to_storage_value(true)),
+    ?assertEqual(false, asobi_lua_api:to_storage_value(false)),
+    ?assertEqual(nil, asobi_lua_api:to_storage_value(nil)).
+
+to_storage_value_maps() ->
+    ?assertEqual(
+        #{~"k" => ~"v", ~"n" => 5},
+        asobi_lua_api:to_storage_value(#{~"k" => ~"v", ~"n" => 5})
+    ),
+    %% Luerl decodes maps to string-keyed proplists. The coercer must
+    %% turn that into an Erlang map so kura's jsonb encoder can serialise.
+    ?assertEqual(
+        #{~"k" => ~"v"},
+        asobi_lua_api:to_storage_value([{~"k", ~"v"}])
+    ).
+
+to_storage_value_arrays() ->
+    %% Luerl decodes Lua arrays to integer-keyed proplists.
+    ?assertEqual(
+        [~"a", ~"b", ~"c"],
+        asobi_lua_api:to_storage_value([{1, ~"a"}, {2, ~"b"}, {3, ~"c"}])
+    ),
+    %% Out-of-order pairs still produce a stable ordering by key.
+    ?assertEqual(
+        [~"a", ~"b", ~"c"],
+        asobi_lua_api:to_storage_value([{3, ~"c"}, {1, ~"a"}, {2, ~"b"}])
+    ).
+
+to_storage_value_nested() ->
+    %% { position = { x = 1, y = 2 }, tags = { "rare", "shiny" } }
+    Input = [
+        {~"position", [{~"x", 1}, {~"y", 2}]},
+        {~"tags", [{1, ~"rare"}, {2, ~"shiny"}]}
+    ],
+    Expected = #{
+        ~"position" => #{~"x" => 1, ~"y" => 2},
+        ~"tags" => [~"rare", ~"shiny"]
+    },
+    ?assertEqual(Expected, asobi_lua_api:to_storage_value(Input)).
+
+%% --- Storage round-trip: scalar values must reach the changeset ---
+
+storage_player_set_scalar() ->
+    storage_player_set_roundtrip("5", 5).
+
+storage_player_set_binary() ->
+    storage_player_set_roundtrip("\"dark\"", ~"dark").
+
+storage_player_set_array() ->
+    storage_player_set_roundtrip("{1, 2, 3}", [1, 2, 3]).
+
+-spec storage_player_set_roundtrip(string(), term()) -> ok.
+storage_player_set_roundtrip(LuaValueExpr, Expected) ->
+    St = install_api(),
+    meck:reset(asobi_repo),
+    meck:expect(asobi_repo, all, fun(_) -> {ok, []} end),
+    Code =
+        "local r = game.storage.player_set('p1', 'inv', 'k', " ++
+            LuaValueExpr ++
+            ")\nreturn r.ok ~= nil",
+    {ok, [true | _], _} = eval(Code, St),
+    %% kura_changeset:cast/4 receives the params map; meck:history captures
+    %% every call to asobi_repo:insert/1. Pull the most recent insert and
+    %% verify the value field round-trips intact.
+    History = meck:history(asobi_repo),
+    [{_, {asobi_repo, insert, [Changeset]}, _} | _] =
+        lists:reverse([H || H <- History, element(2, element(2, H)) =:= insert]),
+    ?assertEqual(Expected, changeset_param(Changeset, value)).
+
+%% Pull a named field out of a kura_changeset record. Position 5 holds
+%% the (normalised) params map per kura.hrl.
+-spec changeset_param(term(), atom()) -> term().
+changeset_param(CS, Field) when is_tuple(CS) ->
+    Params = element(5, CS),
+    maps:get(Field, Params).
 
 %% --- Helpers ---
 
