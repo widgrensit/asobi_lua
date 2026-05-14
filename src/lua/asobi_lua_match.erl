@@ -61,14 +61,14 @@ init(Config) ->
                 erlang:error({missing_lua_script, Config})
         end,
     GameConfig = maps:get(game_config, Config, #{}),
-    case asobi_lua_loader:new(ScriptPath) of
+    Ctx = #{
+        match_id => maps:get(match_id, Config, undefined),
+        match_pid => self()
+    },
+    PreInstall = fun(St) -> asobi_lua_api:install(Ctx, St) end,
+    case asobi_lua_loader:new(ScriptPath, ?INIT_TIMEOUT, PreInstall) of
         {ok, LuaSt0} ->
-            Ctx = #{
-                match_id => maps:get(match_id, Config, undefined),
-                match_pid => self()
-            },
-            LuaSt0a = asobi_lua_api:install(Ctx, LuaSt0),
-            {EncConfig, LuaSt1} = luerl:encode(GameConfig, LuaSt0a),
+            {EncConfig, LuaSt1} = luerl:encode(GameConfig, LuaSt0),
             case asobi_lua_loader:call(init, [EncConfig], LuaSt1, ?INIT_TIMEOUT) of
                 {ok, [GameState | _], LuaSt2} ->
                     {ok, #{

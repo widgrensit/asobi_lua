@@ -558,6 +558,62 @@ hot_reload_zone_tick_survives_syntax_error_test() ->
 
 %% --- Helpers ---
 
+%% --- Regression: `game.*` API must be reachable from every callback ---
+%%
+%% Lua closures capture `_ENV` at compile time. If `asobi_lua_api:install/2`
+%% runs AFTER the script chunk is evaluated, functions the script defined
+%% see a `_G` that doesn't include the `game` namespace. The asymmetry
+%% bites `handle_input` hardest because it uses `call/3` (no bounded_eval
+%% round-trip) — see ADR 0002. These tests fail loudly if any callback
+%% ever loses access to `game.*` again.
+
+%% game_state is held as a luerl tref; decode it for assertions.
+decoded_game_state(#{lua_state := LuaSt, game_state := GS}) ->
+    asobi_lua_api:decode_to_map(GS, LuaSt).
+
+game_namespace_visible_in_init_test() ->
+    {ok, State} = asobi_lua_world:init(#{lua_script => fixture("game_api_world.lua")}),
+    GS = decoded_game_state(State),
+    ?assertEqual(true, maps:get(~"init_saw_game", GS, false)).
+
+game_namespace_visible_in_join_leave_test() ->
+    {ok, S0} = asobi_lua_world:init(#{lua_script => fixture("game_api_world.lua")}),
+    {ok, S1} = asobi_lua_world:join(~"p1", S0),
+    ?assertEqual(true, maps:get(~"join_saw_game", decoded_game_state(S1), false)),
+    {ok, S2} = asobi_lua_world:leave(~"p1", S1),
+    ?assertEqual(true, maps:get(~"leave_saw_game", decoded_game_state(S2), false)).
+
+game_namespace_visible_in_post_tick_test() ->
+    {ok, S0} = asobi_lua_world:init(#{lua_script => fixture("game_api_world.lua")}),
+    {ok, S1} = asobi_lua_world:post_tick(1, S0),
+    ?assertEqual(true, maps:get(~"post_tick_saw_game", decoded_game_state(S1), false)).
+
+game_namespace_visible_in_zone_tick_and_handle_input_test() ->
+    %% This is the regression case: install must happen BEFORE the script
+    %% chunk is evaluated so handle_input's closure can see game.*. zone_tick
+    %% comes along for the ride because it shares the same per-zone state.
+    Script = fixture("game_api_world.lua"),
+    Config = #{game_config => #{lua_script => Script}},
+    {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+    ZoneState = maps:get({0, 0}, ZoneStates),
+
+    erlang:erase({asobi_lua_world, zone_state}),
+    {_Ents, ZoneState1} = asobi_lua_world:zone_tick(#{}, ZoneState),
+    %% ZoneState1.game_state holds the script's zone_state luerl tref;
+    %% decode it to inspect the flag.
+    ZoneTickGS = asobi_lua_api:decode_to_map(
+        maps:get(game_state, ZoneState1), maps:get(lua_state, ZoneState1)
+    ),
+    ?assertEqual(true, maps:get(~"zone_tick_saw_game", ZoneTickGS, false)),
+
+    {ok, Entities1} = asobi_lua_world:handle_input(
+        ~"p1", #{~"kind" => ~"probe"}, #{}
+    ),
+    PE = maps:get(~"p1", Entities1),
+    ?assertEqual(true, maps:get(~"handle_input_saw_game", PE, false)),
+    ?assertEqual(true, maps:get(~"game_id_callable", PE, false)),
+    erlang:erase({asobi_lua_world, zone_state}).
+
 -spec world_temp_script(binary()) -> file:filename_all().
 world_temp_script(Code) ->
     Name = "world_" ++ integer_to_list(erlang:unique_integer([positive])) ++ ".lua",
