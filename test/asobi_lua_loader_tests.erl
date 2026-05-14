@@ -32,7 +32,9 @@ loader_test_() ->
         {"max_heap_words honors application env override", fun max_heap_env_override/0},
         {"math.random works", fun math_random_works/0},
         {"math.sqrt works", fun math_sqrt_works/0},
-        {"math.random no args returns float", fun math_random_no_args/0}
+        {"math.random no args returns float", fun math_random_no_args/0},
+        {"new/3 PreInstall runs before script eval", fun new3_pre_install_before_script/0},
+        {"new/2 backwards-compat (no PreInstall)", fun new2_no_pre_install/0}
     ].
 
 loads_valid_script() ->
@@ -133,6 +135,31 @@ math_random_no_args() ->
     ),
     ?assert(is_float(Result)),
     ?assert(Result >= 0.0 andalso Result < 1.0).
+
+new3_pre_install_before_script() ->
+    %% Script defines a function that closes over a global the host injects
+    %% via PreInstall. If PreInstall runs BEFORE script eval, the closure's
+    %% `_ENV` captures the injected value and `probe()` returns it. If it
+    %% ran AFTER (the bug fixed by this hook), `probe()` would see nil.
+    %% This is the same property that makes `game.*` reachable from
+    %% `handle_input` in the world bridge.
+    PreInstall = fun(St) ->
+        {Enc, St1} = luerl:encode(~"injected_value", St),
+        {ok, St2} = luerl:set_table_keys([~"injected"], Enc, St1),
+        St2
+    end,
+    {ok, St} = asobi_lua_loader:new(
+        fixture("pre_install_probe.lua"), 2000, PreInstall
+    ),
+    {ok, [Value | _], _} = asobi_lua_loader:call(probe, [], St),
+    ?assertEqual(~"injected_value", Value).
+
+new2_no_pre_install() ->
+    %% Without PreInstall, the same script's `probe()` should see nil for
+    %% the missing global. Confirms the new/3 hook is opt-in.
+    {ok, St} = asobi_lua_loader:new(fixture("pre_install_probe.lua"), 2000),
+    {ok, [Value | _], _} = asobi_lua_loader:call(probe, [], St),
+    ?assertEqual(nil, Value).
 
 %% --- Helpers ---
 

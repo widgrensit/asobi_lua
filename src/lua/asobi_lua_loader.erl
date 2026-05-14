@@ -29,7 +29,11 @@ attached (e.g. for evaluating a `config.lua` manifest); use `new/1` to
 load a specific script and pin its base directory for `require`.
 """.
 
--export([new/1, new/2, init_sandboxed/0, call/3, call/4, do_with_timeout/3]).
+-export([new/1, new/2, new/3, init_sandboxed/0, call/3, call/4, do_with_timeout/3]).
+
+-export_type([pre_install/0]).
+
+-type pre_install() :: fun((dynamic()) -> dynamic()).
 
 -include_lib("kernel/include/file.hrl").
 
@@ -54,18 +58,31 @@ load a specific script and pin its base directory for `require`.
 
 -spec new(binary() | string()) -> {ok, dynamic()} | {error, term()}.
 new(ScriptPath) ->
-    new(ScriptPath, ?DEFAULT_INIT_TIMEOUT_MS).
+    new(ScriptPath, ?DEFAULT_INIT_TIMEOUT_MS, fun(St) -> St end).
 
 -spec new(binary() | string(), non_neg_integer()) -> {ok, dynamic()} | {error, term()}.
 new(ScriptPath, TimeoutMs) ->
+    new(ScriptPath, TimeoutMs, fun(St) -> St end).
+
+%% Lua closures capture `_ENV` at compile time, so any global installed
+%% AFTER the script chunk is evaluated is invisible to functions the
+%% script defined. The `PreInstall` hook runs between sandbox setup and
+%% script eval — that is the only window in which adding tables to `_G`
+%% (e.g. the `game.*` API) makes them reachable from every callback the
+%% script defines, including `handle_input` which doesn't go through a
+%% spawn round-trip (see ADR 0002).
+-spec new(binary() | string(), non_neg_integer(), pre_install()) ->
+    {ok, dynamic()} | {error, term()}.
+new(ScriptPath, TimeoutMs, PreInstall) when is_function(PreInstall, 1) ->
     BaseDir = filename:dirname(to_string(ScriptPath)),
     FileName = filename:basename(to_string(ScriptPath)),
     St0 = sandboxed_state(BaseDir),
+    St1 = PreInstall(St0),
     FullPath = filename:join(BaseDir, FileName),
     case file:read_file(FullPath) of
         {ok, Code} ->
             CodeStr = binary_to_list(Code),
-            do_with_timeout(CodeStr, St0, TimeoutMs);
+            do_with_timeout(CodeStr, St1, TimeoutMs);
         {error, Reason} ->
             {error, {file_error, FullPath, Reason}}
     end.

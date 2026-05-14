@@ -437,6 +437,38 @@ handle_input_failure() ->
         file:delete(Path)
     end.
 
+%% --- Regression: `game.*` API must be reachable from every match callback ---
+%%
+%% Mirrors the world-side regression suite. handle_input is the headline
+%% case: ADR 0002 means it uses call/3 (no bounded_eval), and that path
+%% only sees `game.*` if the install ran BEFORE the script chunk was
+%% evaluated.
+
+game_api_visible_in_match_callbacks_test() ->
+    {ok, State0} = asobi_lua_match:init(#{lua_script => fixture("game_api_match.lua")}),
+    ?assertEqual(true, lookup_flag(~"init_saw_game", State0)),
+    {ok, State1} = asobi_lua_match:join(~"p1", State0),
+    ?assertEqual(true, lookup_player_flag(~"p1", ~"join_saw_game", State1)),
+    {ok, State2} = asobi_lua_match:handle_input(~"p1", #{}, State1),
+    ?assertEqual(true, lookup_player_flag(~"p1", ~"handle_input_saw_game", State2)),
+    ?assertEqual(true, lookup_player_flag(~"p1", ~"game_id_callable", State2)),
+    {ok, State3} = asobi_lua_match:tick(State2),
+    ?assertEqual(true, lookup_flag(~"tick_saw_game", State3)),
+    {ok, State4} = asobi_lua_match:leave(~"p1", State3),
+    ?assertEqual(true, lookup_player_flag(~"p1", ~"leave_saw_game", State4)).
+
+-spec lookup_flag(binary(), map()) -> term().
+lookup_flag(Key, #{lua_state := LuaSt, game_state := GS}) ->
+    GsMap = asobi_lua_api:decode_to_map(GS, LuaSt),
+    maps:get(Key, GsMap, false).
+
+-spec lookup_player_flag(binary(), binary(), map()) -> term().
+lookup_player_flag(PlayerId, Key, #{lua_state := LuaSt, game_state := GS}) ->
+    GsMap = asobi_lua_api:decode_to_map(GS, LuaSt),
+    Players = maps:get(~"players", GsMap, #{}),
+    P = maps:get(PlayerId, Players, #{}),
+    maps:get(Key, P, false).
+
 %% --- Helpers ---
 
 -spec init_match() -> {ok, map()}.

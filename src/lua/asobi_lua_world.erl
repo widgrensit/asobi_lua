@@ -63,14 +63,10 @@ init(Config) ->
                 erlang:error({missing_lua_script, Config})
         end,
     GameConfig = maps:get(game_config, Config, #{}),
-    case asobi_lua_loader:new(ScriptPath) of
+    PreInstall = fun(St) -> asobi_lua_api:install(make_ctx(Config), St) end,
+    case asobi_lua_loader:new(ScriptPath, ?INIT_TIMEOUT, PreInstall) of
         {ok, LuaSt0} ->
-            Ctx = #{
-                match_id => maps:get(match_id, Config, undefined),
-                match_pid => self()
-            },
-            LuaSt0a = asobi_lua_api:install(Ctx, LuaSt0),
-            {EncConfig, LuaSt1} = luerl:encode(GameConfig, LuaSt0a),
+            {EncConfig, LuaSt1} = luerl:encode(GameConfig, LuaSt0),
             case asobi_lua_loader:call(init, [EncConfig], LuaSt1, ?INIT_TIMEOUT) of
                 {ok, [GameState | _], LuaSt2} ->
                     {ok, #{
@@ -245,10 +241,15 @@ generate_world(Seed, Config) when is_map(Config) ->
         undefined ->
             {ok, #{}};
         ScriptPath ->
-            case asobi_lua_loader:new(ScriptPath) of
+            %% match_pid in the ctx is the caller of generate_world/2 — typically
+            %% asobi_world_server, not a match process. game.broadcast emitted
+            %% from a script's generate_world callback therefore reaches the
+            %% world server, mirroring how broadcast already routed pre-fix.
+            PreInstall = fun(St) -> asobi_lua_api:install(make_ctx(Config), St) end,
+            case asobi_lua_loader:new(ScriptPath, ?GENERATE_TIMEOUT, PreInstall) of
                 {ok, LuaSt} ->
                     {ok, ZoneStates} = generate_world(Seed, #{lua_state => LuaSt}),
-                    {ok, inject_per_zone_lua(ZoneStates, ScriptPath)};
+                    {ok, inject_per_zone_lua(ZoneStates, ScriptPath, PreInstall)};
                 {error, Reason} ->
                     logger:error(#{
                         msg =>
@@ -260,8 +261,10 @@ generate_world(Seed, Config) when is_map(Config) ->
             end
     end.
 
--spec inject_per_zone_lua(map(), file:filename_all()) -> map().
-inject_per_zone_lua(ZoneStates, ScriptPath) ->
+-spec inject_per_zone_lua(
+    map(), file:filename_all(), asobi_lua_loader:pre_install()
+) -> map().
+inject_per_zone_lua(ZoneStates, ScriptPath, PreInstall) ->
     Mtime = filelib:last_modified(ScriptPath),
     maps:map(
         fun(_Coords, ZoneState) ->
@@ -270,7 +273,7 @@ inject_per_zone_lua(ZoneStates, ScriptPath) ->
                     M when is_map(M) -> M;
                     _ -> #{}
                 end,
-            case asobi_lua_loader:new(ScriptPath) of
+            case asobi_lua_loader:new(ScriptPath, ?GENERATE_TIMEOUT, PreInstall) of
                 {ok, LuaSt} ->
                     Base#{
                         lua_state => LuaSt,
@@ -671,3 +674,10 @@ decode_respawn_rule(_) ->
 decode_max_respawns(nil) -> infinity;
 decode_max_respawns(N) when is_number(N) -> trunc(N);
 decode_max_respawns(_) -> infinity.
+
+-spec make_ctx(map()) -> map().
+make_ctx(Config) ->
+    #{
+        match_id => maps:get(match_id, Config, undefined),
+        match_pid => self()
+    }.
