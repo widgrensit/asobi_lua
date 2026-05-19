@@ -60,6 +60,9 @@ names = {"Spark", "Blitz", "Volt"}
 """.
 
 -export([maybe_load_game_config/0]).
+-ifdef(TEST).
+-export([safe_join/2]).
+-endif.
 
 -spec maybe_load_game_config() -> ok | {error, term()}.
 maybe_load_game_config() ->
@@ -99,10 +102,19 @@ build_modes_from_manifest(GameDir, PropList) when is_list(PropList) ->
     Results = lists:map(
         fun
             ({ModeName, ScriptRel}) when is_binary(ModeName), is_binary(ScriptRel) ->
-                ScriptAbs = filename:join(GameDir, binary_to_list(ScriptRel)),
-                case load_match_config(ScriptAbs) of
-                    {ok, ModeConfig} ->
-                        {ok, {ModeName, ModeConfig}};
+                %% H1 (2026-05-19): config.lua is operator-trusted but its
+                %% values flow through unmodified to file:read_file +
+                %% Lua eval. Anchor every mode->script entry inside GameDir
+                %% so a stray "../" cannot trick the runtime into loading
+                %% an arbitrary readable file as Lua.
+                case safe_join(GameDir, ScriptRel) of
+                    {ok, ScriptAbs} ->
+                        case load_match_config(ScriptAbs) of
+                            {ok, ModeConfig} ->
+                                {ok, {ModeName, ModeConfig}};
+                            {error, Reason} ->
+                                {error, {ModeName, Reason}}
+                        end;
                     {error, Reason} ->
                         {error, {ModeName, Reason}}
                 end;
@@ -268,16 +280,72 @@ maybe_add_bots(Config, BotProps, ScriptPath) when is_list(BotProps) ->
         undefined ->
             Config;
         BotScript when is_binary(BotScript) ->
-            AbsBot = filename:join(BaseDir, binary_to_list(BotScript)),
-            Config#{
-                bots => #{
-                    enabled => true,
-                    script => unicode:characters_to_binary(AbsBot)
-                }
-            }
+            %% H1 (2026-05-19): the same anchoring applies here. match.lua
+            %% is operator-controlled but its bots.script string is what
+            %% the runtime hands to file:read_file; reject any segment that
+            %% escapes the match's own directory.
+            case safe_join(BaseDir, BotScript) of
+                {ok, AbsBot} ->
+                    Config#{
+                        bots => #{
+                            enabled => true,
+                            script => unicode:characters_to_binary(AbsBot)
+                        }
+                    };
+                {error, _} ->
+                    logger:warning(#{
+                        msg => ~"bots.script rejected: path escapes match dir",
+                        base_dir => unicode:characters_to_binary(BaseDir),
+                        script => BotScript
+                    }),
+                    Config
+            end
     end;
 maybe_add_bots(Config, _, _) ->
     Config.
+
+%% H1 (2026-05-19): anchor a Lua-supplied relative path inside Base. Reject
+%% absolute paths, `..` segments, and anything whose `filename:absname/1`
+%% normalisation escapes the base directory. Returns the absolute path on
+%% success.
+-spec safe_join(string() | binary(), binary()) ->
+    {ok, string()} | {error, binary()}.
+safe_join(Base, RelBin) when is_binary(RelBin) ->
+    case is_safe_relative(RelBin) of
+        false ->
+            {error, ~"script path must be relative and may not contain '..'"};
+        true ->
+            BaseStr = to_string(Base),
+            BaseAbs = to_chars(filename:absname(BaseStr)),
+            Joined = to_chars(
+                filename:absname(filename:join(BaseAbs, binary_to_list(RelBin)))
+            ),
+            case lists:prefix(BaseAbs ++ "/", Joined) of
+                true -> {ok, Joined};
+                false -> {error, ~"script path escapes game directory"}
+            end
+    end.
+
+-spec to_chars(file:filename_all()) -> string().
+to_chars(B) when is_binary(B) -> binary_to_list(B);
+to_chars(L) when is_list(L) -> L.
+
+-spec is_safe_relative(binary()) -> boolean().
+is_safe_relative(<<>>) ->
+    false;
+is_safe_relative(<<"/", _/binary>>) ->
+    false;
+is_safe_relative(Bin) ->
+    Parts = binary:split(Bin, ~"/", [global]),
+    lists:all(
+        fun
+            (<<>>) -> false;
+            (~"..") -> false;
+            (~".") -> false;
+            (_) -> true
+        end,
+        Parts
+    ).
 
 %% --- Apply to app env ---
 
