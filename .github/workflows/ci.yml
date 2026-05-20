@@ -8,7 +8,7 @@ on:
 
 jobs:
   ci:
-    uses: Taure/erlang-ci/.github/workflows/ci.yml@dc560fbe8e4e39898dd808645fc1d3e69d248429  # main as of 2026-03-31, pinned via Dependabot
+    uses: Taure/erlang-ci/.github/workflows/ci.yml@559dea550228fb7042813f6b6359addec11bedcf  # main as of 2026-05-20, pinned via Dependabot
     permissions:
       contents: write
       pull-requests: write
@@ -16,6 +16,10 @@ jobs:
       otp-version: '28.0.1'
       rebar3-version: '3.27.0'
       enable-audit: true
+      # GHSA-g2wm-735q-3f56 (LOW, cowlib cookie/1) has no upstream patch and
+      # does not apply: asobi_lua does not call cow_cookie:cookie/1.
+      # Tracked in docs/security_audit_2026_05_19.md.
+      audit-ignores: 'GHSA-g2wm-735q-3f56'
       enable-dependency-submission: true
       enable-summary: true
     secrets: inherit
