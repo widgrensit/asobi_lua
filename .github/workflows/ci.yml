@@ -16,6 +16,10 @@ jobs:
       otp-version: '28.0.1'
       rebar3-version: '3.27.0'
       enable-audit: true
+      # GHSA-g2wm-735q-3f56 (LOW, cowlib cookie/1) has no upstream patch and
+      # does not apply: asobi_lua only reaches cowlib via cowboy. Tracked
+      # alongside the cowboy 2.15.0 bump that closes GHSA-jfc2-q6qh-g5x8.
+      audit-ignores: 'GHSA-g2wm-735q-3f56'
       enable-dependency-submission: true
       enable-summary: true
     secrets: inherit
