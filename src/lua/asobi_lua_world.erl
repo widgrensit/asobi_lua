@@ -38,6 +38,7 @@ function on_zone_unloaded(cx, cy, state)     -- return state
 -export([phases/1, on_phase_started/2, on_phase_ended/2]).
 -export([spawn_templates/1, on_world_recovered/2]).
 -export([terrain_provider/1, on_zone_loaded/2, on_zone_unloaded/2]).
+-export([init_zone_state/2, dump_zone_state/1]).
 
 %% Wall-clock budgets for Lua callbacks. Init-time callbacks
 %% (`init`, `generate_world`, `phases`, `spawn_templates`,
@@ -250,8 +251,10 @@ generate_world(Seed, Config) when is_map(Config) ->
             PreInstall = fun(St) -> asobi_lua_api:install(make_ctx(Config), St) end,
             case asobi_lua_loader:new(ScriptPath, ?GENERATE_TIMEOUT, PreInstall) of
                 {ok, LuaSt} ->
-                    {ok, ZoneStates} = generate_world(Seed, #{lua_state => LuaSt}),
-                    {ok, inject_per_zone_lua(ZoneStates, ScriptPath, PreInstall)};
+                    %% Only used to ask the script for zone coords + initial
+                    %% per-zone state. Each zone builds its own VM later, in its
+                    %% own process, via init_zone_state/2.
+                    generate_world(Seed, #{lua_state => LuaSt});
                 {error, Reason} ->
                     ?LOG_ERROR(#{
                         msg =>
@@ -262,32 +265,6 @@ generate_world(Seed, Config) when is_map(Config) ->
                     {ok, #{}}
             end
     end.
-
--spec inject_per_zone_lua(
-    map(), file:filename_all(), asobi_lua_loader:pre_install()
-) -> map().
-inject_per_zone_lua(ZoneStates, ScriptPath, PreInstall) ->
-    Mtime = filelib:last_modified(ScriptPath),
-    maps:map(
-        fun(_Coords, ZoneState) ->
-            Base =
-                case ZoneState of
-                    M when is_map(M) -> M;
-                    _ -> #{}
-                end,
-            case asobi_lua_loader:new(ScriptPath, ?GENERATE_TIMEOUT, PreInstall) of
-                {ok, LuaSt} ->
-                    Base#{
-                        lua_state => LuaSt,
-                        script => ScriptPath,
-                        script_mtime => Mtime
-                    };
-                {error, _} ->
-                    Base
-            end
-        end,
-        ZoneStates
-    ).
 
 -spec get_state(binary(), map()) -> map().
 get_state(PlayerId, #{lua_state := LuaSt, game_state := GS}) ->
@@ -676,6 +653,78 @@ decode_respawn_rule(_) ->
 decode_max_respawns(nil) -> infinity;
 decode_max_respawns(N) when is_number(N) -> trunc(N);
 decode_max_respawns(_) -> infinity.
+
+%% Build this zone's Luerl VM in the zone process, so it binds to the zone pid
+%% (self()) and game.zone.spawn / zone-based game.spatial / game.terrain resolve.
+%% Called once via asobi_zone's handle_continue, for every zone-creation path
+%% (pre-spawned, lazy, recovered). Re-encodes gameplay state from a prior
+%% snapshot if present; the VM itself is never persisted, only rebuilt here.
+-spec init_zone_state(map(), term()) -> map().
+init_zone_state(Config, ZoneState00) ->
+    %% An empty Lua zone table decodes to [], not #{}; coerce before merging.
+    ZoneState0 =
+        case ZoneState00 of
+            M when is_map(M) -> M;
+            _ -> #{}
+        end,
+    GameConfig = maps:get(game_config, Config, #{}),
+    case maps:get(lua_script, GameConfig, undefined) of
+        undefined ->
+            ZoneState0;
+        ScriptPath ->
+            PreInstall = fun(St) -> asobi_lua_api:install(zone_ctx(Config), St) end,
+            case asobi_lua_loader:new(ScriptPath, ?GENERATE_TIMEOUT, PreInstall) of
+                {ok, LuaSt0} ->
+                    {GameState, LuaSt1} = restore_game_state(ZoneState0, LuaSt0),
+                    ZoneState0#{
+                        lua_state => LuaSt1,
+                        game_state => GameState,
+                        script => ScriptPath,
+                        script_mtime => filelib:last_modified(ScriptPath)
+                    };
+                {error, Reason} ->
+                    ?LOG_ERROR(#{
+                        msg =>
+                            ~"asobi_lua_world init_zone_state: lua_loader:new failed; zone Lua inert",
+                        script => ScriptPath,
+                        reason => Reason
+                    }),
+                    ZoneState0
+            end
+    end.
+
+%% Inverse of init_zone_state's restore path: drop the non-serialisable VM and
+%% decode the script's gameplay state to a plain, JSON-safe map for jsonb.
+%% game_state is the sole canonical persisted field; other per-zone keys are
+%% rebuilt from config on init, so they are intentionally not carried here.
+%% A never-seeded zone (game_state nil) round-trips as null, not #{}, so the
+%% script's `game_state == nil` initialisation guard still fires after recovery.
+-spec dump_zone_state(map()) -> map().
+dump_zone_state(#{lua_state := LuaSt} = ZoneState) ->
+    GameState =
+        case maps:get(game_state, ZoneState, nil) of
+            nil -> null;
+            GS -> decode_to_map(GS, LuaSt)
+        end,
+    #{~"game_state" => GameState};
+dump_zone_state(ZoneState) ->
+    maps:remove(lua_state, ZoneState).
+
+-spec restore_game_state(map(), dynamic()) -> {dynamic(), dynamic()}.
+restore_game_state(ZoneState0, LuaSt) ->
+    case maps:get(~"game_state", ZoneState0, undefined) of
+        Map when is_map(Map) -> luerl:encode(Map, LuaSt);
+        _ -> {nil, LuaSt}
+    end.
+
+-spec zone_ctx(map()) -> map().
+zone_ctx(Config) ->
+    GameConfig = maps:get(game_config, Config, #{}),
+    #{
+        zone_pid => self(),
+        match_pid => maps:get(world_server_pid, Config, self()),
+        match_id => maps:get(match_id, GameConfig, maps:get(world_id, Config, undefined))
+    }.
 
 -spec make_ctx(map()) -> map().
 make_ctx(Config) ->

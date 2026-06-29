@@ -103,7 +103,7 @@ world_handle_input_no_wall_clock_timeout_test() ->
     ),
     Config = #{game_config => #{lua_script => Path}},
     {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
-    Zone0 = maps:get({0, 0}, ZoneStates),
+    Zone0 = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
     Self = self(),
     %% Process dictionary doesn't inherit across spawns — set it inside
     %% the child so handle_input enters the Lua call path.
