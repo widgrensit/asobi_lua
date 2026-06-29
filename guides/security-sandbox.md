@@ -16,8 +16,9 @@ script cannot reach them:
 - **Package machinery:** the entire `package` library, plus the default
   `require`
 - **Unstructured logging:** `print`, `eprint` — Luerl's defaults bypass
-  the structured logger and write straight to BEAM stdout. Scripts that
-  need to log should go through the asobi-side `game.log` API.
+  the structured logger and write straight to BEAM stdout. There is
+  currently no in-script logging API; surface diagnostics through game
+  state or broadcast events instead.
 
 `os.clock`, `os.date`, `os.difftime`, and `os.time` remain available so
 games can timestamp.
