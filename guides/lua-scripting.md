@@ -559,5 +559,6 @@ still work for client-side filtering without a zone process.
 ## Next Steps
 
 - [Bots](lua-bots.md) -- add AI-controlled players to your game
-- [Configuration](configuration.md) -- all Asobi configuration options
-- [WebSocket Protocol](websocket-protocol.md) -- client-server message format
+- [Self-hosting](self-hosting.md) -- production deployment and live updates
+- [Configuration](https://asobi.dev/docs/configuration) -- all Asobi configuration options
+- [WebSocket Protocol](https://asobi.dev/docs/protocols/websocket) -- client-server message format
