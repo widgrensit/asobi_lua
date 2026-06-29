@@ -28,11 +28,13 @@ generate_world_from_raw_config_test() ->
     ?assert(is_map(ZoneStates)),
     %% The fixture declares one zone at "0,0"; the bridge parses it into a tuple.
     ?assert(maps:is_key({0, 0}, ZoneStates)),
-    %% Each zone must have its own lua_state stitched in so zone_tick/
-    %% handle_input can invoke Lua callbacks.
+    %% generate_world returns plain zone states; the per-zone VM is built later,
+    %% in the zone process, via init_zone_state/2.
     Zone = maps:get({0, 0}, ZoneStates),
     ?assert(is_map(Zone)),
-    ?assert(maps:is_key(lua_state, Zone)).
+    ?assertNot(maps:is_key(lua_state, Zone)),
+    Built = asobi_lua_world:init_zone_state(Config, Zone),
+    ?assert(maps:is_key(lua_state, Built)).
 
 generate_world_missing_script_returns_empty_test() ->
     Config = #{game_config => #{}},
@@ -50,7 +52,8 @@ handle_input_uses_zone_state_from_proc_dict_test() ->
     Config = #{game_config => #{lua_script => Script}},
     {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
     ?assert(maps:is_key({0, 0}, ZoneStates)),
-    ZoneState = maps:get({0, 0}, ZoneStates),
+    %% The zone process builds the per-zone VM via init_zone_state before ticking.
+    ZoneState = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
 
     %% First zone_tick primes the proc dict.
     erlang:erase({asobi_lua_world, zone_state}),
@@ -78,7 +81,7 @@ generate_world_empty_zone_table_still_gets_lua_state_test() ->
     Config = #{game_config => #{lua_script => Script}},
     {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
     ?assert(maps:is_key({0, 0}, ZoneStates)),
-    Zone = maps:get({0, 0}, ZoneStates),
+    Zone = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
     ?assert(is_map(Zone)),
     ?assert(maps:is_key(lua_state, Zone)),
 
@@ -494,7 +497,7 @@ hot_reload_zone_tick_picks_up_global_change_test() ->
     try
         Config = #{game_config => #{lua_script => Path}, mode => ~"test"},
         {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
-        Zone0 = maps:get({0, 0}, ZoneStates),
+        Zone0 = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
         erlang:erase({asobi_lua_world, zone_state}),
         {Ents0, Zone1} = asobi_lua_world:zone_tick(#{}, Zone0),
         ?assertMatch(#{~"marker" := #{~"tag" := ~"before"}}, Ents0),
@@ -541,7 +544,7 @@ hot_reload_zone_tick_survives_syntax_error_test() ->
     try
         Config = #{game_config => #{lua_script => Path}, mode => ~"test"},
         {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
-        Zone0 = maps:get({0, 0}, ZoneStates),
+        Zone0 = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
         erlang:erase({asobi_lua_world, zone_state}),
         {_E0, Zone1} = asobi_lua_world:zone_tick(#{}, Zone0),
 
@@ -595,7 +598,7 @@ game_namespace_visible_in_zone_tick_and_handle_input_test() ->
     Script = fixture("game_api_world.lua"),
     Config = #{game_config => #{lua_script => Script}},
     {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
-    ZoneState = maps:get({0, 0}, ZoneStates),
+    ZoneState = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
 
     erlang:erase({asobi_lua_world, zone_state}),
     {_Ents, ZoneState1} = asobi_lua_world:zone_tick(#{}, ZoneState),
