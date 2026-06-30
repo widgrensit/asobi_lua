@@ -14,6 +14,12 @@ jobs:
       pull-requests: write
     with:
       version-file: '.tool-versions'
+      # version-file drives analysis jobs; the eunit/ct matrix needs otp-matrix
+      # (else it falls back to the otp-version default of 28). And meck is a
+      # test-only dep absent from rebar.lock, so a stale OTP-28-era meck is
+      # restored from cache and fails on OTP 29 - drop it so it re-resolves.
+      otp-matrix: '["29.0.2"]'
+      pre-test-command: 'rm -rf _build/test/lib/meck'
       enable-audit: true
       enable-dependency-submission: true
       enable-summary: true
