@@ -25,8 +25,8 @@ jobs:
 
       - uses: erlef/setup-beam@v1
         with:
-          otp-version: '28.0.1'
-          rebar3-version: '3.27.0'
+          version-file: '.tool-versions'
+          version-type: strict
 
       - name: Cache _build
         uses: actions/cache@v4

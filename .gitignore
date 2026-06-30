@@ -4,5 +4,4 @@ _checkouts/
 rebar3.crashdump
 erl_crash.dump
 CLAUDE.md
-.tool-versions
 doc/
