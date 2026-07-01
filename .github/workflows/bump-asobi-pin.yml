@@ -1,0 +1,56 @@
+name: Bump asobi pin
+
+# Weekly: move the git-pinned asobi dependency in rebar.lock to the current
+# main HEAD and open a PR if it changed. Closes the pin-drift gap where an
+# upstream fix never reaches this repo because the locked ref is frozen.
+
+on:
+  schedule:
+    - cron: '30 4 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: bump-asobi-pin
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: erlef/setup-beam@v1
+        with:
+          version-file: .tool-versions
+          version-type: strict
+
+      - name: Upgrade asobi to latest main
+        run: rebar3 upgrade asobi
+
+      - name: Open PR if the lock moved
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if git diff --quiet rebar.lock; then
+            echo "asobi pin already at latest main; nothing to do."
+            exit 0
+          fi
+          new_ref=$(grep -A2 '<<"asobi">>' rebar.lock | grep -oE '[0-9a-f]{40}' | head -1)
+          branch="chore/bump-asobi-pin"
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          git add rebar.lock
+          git commit -m "chore(deps): bump asobi pin to latest main (${new_ref:0:12})"
+          git push -f origin "$branch"
+          if [ -z "$(gh pr list --head "$branch" --state open --json number --jq '.[0].number // empty')" ]; then
+            gh pr create --head "$branch" --base main \
+              --title "chore(deps): bump asobi pin to latest main" \
+              --body "Moves the git-pinned \`asobi\` ref in \`rebar.lock\` to the current main HEAD (\`${new_ref:0:12}\`), so upstream fixes reach this repo. Opened automatically by the weekly pin-bump workflow; review and merge once CI is green."
+          else
+            echo "PR already open for $branch; force-pushed the refreshed lock."
+          fi
