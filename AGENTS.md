@@ -53,8 +53,11 @@ Migrations are never hand-written; the storage schema comes from `asobi`. Use
 
 ## Pre-push checklist (all green)
 
-`fmt` -> `xref` -> `dialyzer` -> `elp eqwalize-all` -> `elp lint` ->
-`eunit`/`ct` -> `mutate` -> `fmt --check`, plus `rebar3 ex_doc`.
+`rebar3 fmt` -> `rebar3 xref` -> `rebar3 dialyzer` -> `rebar3 eunit` ->
+`rebar3 ct` -> `rebar3 ex_doc` -> `rebar3 fmt --check`.
+
+CI additionally runs dependency audit; eqwalize/lint/mutate not wired here
+(eqwalize panics on OTP 29) - add if that changes.
 
 ## Conventions
 
