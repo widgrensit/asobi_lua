@@ -38,9 +38,9 @@ RUN mkdir -p /app/game && chown -R asobi:asobi /app
 VOLUME ["/app/game"]
 
 USER asobi
-EXPOSE 8080
+EXPOSE 8084
 
-ENV ASOBI_PORT=8080 \
+ENV ASOBI_PORT=8084 \
     ASOBI_NODE_HOST=127.0.0.1 \
     ASOBI_DB_HOST=db \
     ASOBI_DB_NAME=asobi \
