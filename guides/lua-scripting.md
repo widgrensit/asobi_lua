@@ -92,7 +92,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     ports:
-      - "8080:8080"
+      - "8084:8084"
     volumes:
       - ./lua:/app/game:ro
     environment:
