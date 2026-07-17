@@ -47,7 +47,7 @@ games can timestamp.
 ## Per-callback wall-clock limits
 
 Every Lua callback the bridges call (init, tick, join, leave,
-handle_input, get_state, vote_requested, vote_resolved, generate_world,
+get_state, vote_requested, vote_resolved, generate_world,
 phases, spawn_templates, on_phase_started/ended, on_zone_loaded/unloaded,
 on_world_recovered, terrain_provider, spawn_position, post_tick,
 zone_tick, bot `think`) runs in a child process with a wall-clock
@@ -57,6 +57,12 @@ logs a warning and continues with the previous state. Limits are tuned
 per callback — init/generate_world get more time, per-tick callbacks
 get less. See the `?*_TIMEOUT` macros in `asobi_lua_match.erl` and
 `asobi_lua_world.erl`.
+
+**`handle_input/3` is the exception: it is _not_ wall-clock-bounded.** It runs
+inline for measured tail-latency wins at high input rates (ADR 0002), so a
+`while true do end` there hangs the match until the gen_server timeout (5 s) and
+the supervisor restarts the match — blast radius one match. It is not a sandbox
+boundary; see the [trust model](security-trust-model.md#per-callback-isolation).
 
 The same wall-clock wrapper is applied to the **initial script body**
 load (`asobi_lua_loader:new/1`), the **hot-reload** path (in
