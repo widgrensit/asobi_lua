@@ -39,12 +39,10 @@ end
 The platform reads `names` from your bot script at runtime. Bot names are
 prefixed with `bot_` (e.g., `bot_Spark`).
 
-Platform-level bot tuning is controlled via environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ASOBI_BOT_FILL_AFTER` | `8000` | Milliseconds before bots fill queue |
-| `ASOBI_BOT_MIN_PLAYERS` | `match_size` | Fill up to this many players |
+The spawner checks the queue every 8 seconds (a fixed interval, not tunable) and
+fills a waiting match with bots up to the mode's `min_players`. Both settings
+below live in the game mode's `bots` map — there are no bot environment
+variables.
 
 ### Erlang (sys.config)
 
@@ -57,7 +55,6 @@ For Erlang OTP projects, configure bots in `sys.config`:
         match_size => 4,
         bots => #{
             enabled => true,
-            fill_after_ms => 8000,
             min_players => 4,
             script => <<"game/bots/chaser.lua">>
         }
