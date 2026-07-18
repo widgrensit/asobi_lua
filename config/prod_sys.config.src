@@ -46,7 +46,12 @@
         {socket_options, [${ASOBI_DB_SOCKET_OPTS}]}
     ]},
     {asobi, [
-        {game_dir, "/app/game"}
+        {game_dir, "/app/game"},
+        %% Anonymous guest auth (POST /api/v1/auth/guest). Off unless
+        %% ASOBI_GUEST_AUTH=true AND a pepper of >= 32 bytes is set; a shorter or
+        %% empty pepper is treated as unconfigured, so this fails closed.
+        {guest_auth, ${ASOBI_GUEST_AUTH}},
+        {guest_verifier_pepper, <<"${ASOBI_GUEST_VERIFIER_PEPPER}">>}
     ]},
     {asobi_lua, []},
     {shigoto, [

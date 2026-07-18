@@ -47,6 +47,16 @@ ENV ASOBI_PORT=8084 \
     ASOBI_DB_USER=postgres \
     ASOBI_DB_PASSWORD=postgres
 
+# Anonymous guest auth is off by default. To enable it, set ASOBI_GUEST_AUTH=true
+# and a strong ASOBI_GUEST_VERIFIER_PEPPER. Use a base64/hex pepper from >= 32
+# random bytes (NOT raw /dev/urandom bytes, whose quotes/newlines would break the
+# rendered config and crash boot):  openssl rand -base64 48
+# A pepper under 32 bytes is treated as unconfigured, so guest auth fails closed.
+# The rendered sys.config holds the pepper in cleartext - treat it, and any
+# erl_crash.dump, as secret-bearing. The default below keeps the config a valid
+# atom when an operator leaves ASOBI_GUEST_AUTH unset.
+ENV ASOBI_GUEST_AUTH=false
+
 # Erlang term fragment spliced into kura's socket_options list.
 # Default forces IPv4; set to "inet6" for IPv6-only Postgres networks.
 ENV ASOBI_DB_SOCKET_OPTS=inet
