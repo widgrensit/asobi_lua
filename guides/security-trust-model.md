@@ -64,8 +64,9 @@ in those callbacks crashes the child, the parent gen_server receives a
 | `get_state/{1,2}` | match, world | yes | 100 ms |
 | `join/2`, `leave/2` | match, world | yes | 200 ms |
 | `vote_*` | match | yes | 200 ms |
-| `phases/1`, `on_phase_*/2` | world | yes | 200 ms |
-| `terrain_provider/1` | world | yes | 5000 ms |
+| `phases/1` | world | yes | 2000 ms |
+| `on_phase_*/2` | world | yes | 200 ms |
+| `terrain_provider/1` | world | yes | 2000 ms |
 | **`handle_input/3`** | **match, world** | **NO** | **(see below)** |
 
 `handle_input/3` is the one callback that does **not** spawn-isolate.
