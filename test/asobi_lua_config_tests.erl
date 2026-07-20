@@ -60,7 +60,14 @@ config_test_() ->
                 fun config_missing_match_script/0},
             {"bot_config table with min_players is forwarded", fun bot_config_min_players/0},
             {"world dimension globals (tick_rate/grid_size/zone_size/view_radius/persistent)",
-                fun world_dimension_globals_forwarded/0}
+                fun world_dimension_globals_forwarded/0},
+            {"guest_auth = true global enables the asobi guest_auth flag",
+                fun guest_auth_global_enables/0},
+            {"guest_auth absent leaves the flag off", fun guest_auth_absent_leaves_off/0},
+            {"guest_auth truthy non-bool does not enable",
+                fun guest_auth_truthy_nonbool_stays_off/0},
+            {"guest_auth resets a stale true when a later bundle omits it",
+                fun guest_auth_stale_true_is_reset/0}
         ]}.
 
 single_mode_loads_globals() ->
@@ -83,6 +90,51 @@ single_mode_minimal() ->
     Mode = maps:get(~"default", Modes),
     ?assertEqual(2, maps:get(match_size, Mode)),
     ?assertEqual(2, maps:get(max_players, Mode)),
+    cleanup_temp_dir(TmpDir).
+
+guest_auth_global_enables() ->
+    application:unset_env(asobi, guest_auth),
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(
+        filename:join(TmpDir, "match.lua"),
+        ~"match_size = 2\nguest_auth = true\n"
+    ),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    ?assertEqual({ok, true}, application:get_env(asobi, guest_auth)),
+    application:unset_env(asobi, guest_auth),
+    cleanup_temp_dir(TmpDir).
+
+guest_auth_absent_leaves_off() ->
+    application:unset_env(asobi, guest_auth),
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), ~"match_size = 2\n"),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    ?assertNotEqual({ok, true}, application:get_env(asobi, guest_auth)),
+    cleanup_temp_dir(TmpDir).
+
+guest_auth_truthy_nonbool_stays_off() ->
+    application:unset_env(asobi, guest_auth),
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(
+        filename:join(TmpDir, "match.lua"),
+        ~"match_size = 2\nguest_auth = 1\n"
+    ),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    ?assertNotEqual({ok, true}, application:get_env(asobi, guest_auth)),
+    application:unset_env(asobi, guest_auth),
+    cleanup_temp_dir(TmpDir).
+
+guest_auth_stale_true_is_reset() ->
+    application:set_env(asobi, guest_auth, true),
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), ~"match_size = 2\n"),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    ?assertEqual({ok, false}, application:get_env(asobi, guest_auth)),
+    application:unset_env(asobi, guest_auth),
     cleanup_temp_dir(TmpDir).
 
 single_mode_missing_size() ->

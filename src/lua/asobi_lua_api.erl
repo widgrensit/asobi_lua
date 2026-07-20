@@ -61,6 +61,15 @@ game.zone.despawn(entity_id)
 game.terrain.get_chunk(cx, cy)                   -- get compressed chunk data
 game.terrain.preload(coords_list)                -- preload chunks async
 ```
+
+## Result envelope
+
+The persistence-style calls (`economy.*`, `storage.*`, `leaderboard.top/rank/around`,
+`terrain.get_chunk`, `notify`) return a wrapped result: `{ ok = Value }` on
+success, `{ error = "reason" }` on failure (`ok_result/2` / `error_result/2` via
+`wrap_result/2`). Read `result.ok`. The plain calls (`broadcast`, `send`,
+`chat.send`, `zone.spawn`/`despawn`, `leaderboard.submit`, `spatial.*`) return
+their value directly.
 """.
 
 -include_lib("kernel/include/logger.hrl").

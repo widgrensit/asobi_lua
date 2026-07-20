@@ -25,16 +25,20 @@ jobs:
 
       - uses: erlef/setup-beam@v1
         with:
-          otp-version: '28.0.1'
-          rebar3-version: '3.27.0'
+          version-file: '.tool-versions'
+          version-type: strict
 
       - name: Cache _build
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: _build
-          key: nightly-prop-${{ hashFiles('rebar.lock') }}
+          # rebar.config is hashed too: test-profile deps (meck, proper) and the
+          # asobi git ref are not written to rebar.lock, so a lock-only key never
+          # busts when they bump. The -v2- prefix retires the poisoned pre-OTP-29
+          # caches (stale meck 0.9, pulled transitively via asobi).
+          key: nightly-prop-v2-${{ hashFiles('rebar.config', 'rebar.lock') }}
           restore-keys: |
-            nightly-prop-
+            nightly-prop-v2-
 
       - name: Run property tests at high numtests
         run: |
@@ -50,7 +54,7 @@ jobs:
     permissions:
       issues: write
     steps:
-      - uses: actions/github-script@v7
+      - uses: actions/github-script@v9
         with:
           script: |
             const title = `Nightly failure: ${new Date().toISOString().slice(0,10)}`;

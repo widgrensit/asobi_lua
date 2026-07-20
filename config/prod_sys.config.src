@@ -36,6 +36,7 @@
     ]},
     {kura, [
         {repo, asobi_repo},
+        {backend, kura_backend_postgres},
         {host, "${ASOBI_DB_HOST}"},
         {port, 5432},
         {database, "${ASOBI_DB_NAME}"},
@@ -45,7 +46,13 @@
         {socket_options, [${ASOBI_DB_SOCKET_OPTS}]}
     ]},
     {asobi, [
-        {game_dir, "/app/game"}
+        {game_dir, "/app/game"},
+        %% Anonymous guest auth (POST /api/v1/auth/guest) is on iff the game
+        %% declares `guest_auth = true` in its Lua AND a >= 32-byte pepper is set
+        %% here; a shorter/empty pepper is treated as unconfigured, so it fails
+        %% closed (ADR 0004). The toggle is game config, not an env var; only the
+        %% pepper (a secret) is operator-injected.
+        {guest_verifier_pepper, <<"${ASOBI_GUEST_VERIFIER_PEPPER}">>}
     ]},
     {asobi_lua, []},
     {shigoto, [
