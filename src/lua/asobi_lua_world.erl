@@ -7,7 +7,7 @@ The Lua script must define these functions:
 
 ```lua
 function init(config)                        -- return initial game state
-function join(player_id, state)              -- return updated state
+function join(player_id, state, ctx)         -- ctx is the client join context
 function leave(player_id, state)             -- return updated state
 function spawn_position(player_id, state)    -- return {x, y}
 function zone_tick(entities, zone_state)     -- return entities, zone_state
@@ -32,7 +32,7 @@ function on_zone_unloaded(cx, cy, state)     -- return state
 
 -include_lib("kernel/include/logger.hrl").
 
--export([init/1, join/2, leave/2, spawn_position/2]).
+-export([init/1, join/2, join/3, leave/2, spawn_position/2]).
 -export([zone_tick/2, handle_input/3, post_tick/2]).
 -export([generate_world/2, get_state/2]).
 -export([phases/1, on_phase_started/2, on_phase_ended/2]).
@@ -102,8 +102,22 @@ init(Config) ->
     end.
 
 -spec join(binary(), map()) -> {ok, map()} | {error, term()}.
-join(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
-    case asobi_lua_loader:call(join, [PlayerId, GS], LuaSt, ?JOIN_TIMEOUT) of
+join(PlayerId, State) ->
+    join(PlayerId, #{}, State).
+
+-doc """
+Join carrying the client-supplied join context (asobi's optional `join/3`).
+
+Passed to the Lua `join` as a third argument: `function join(player_id,
+state)` keeps working (Lua discards extra arguments) and
+`function join(player_id, state, ctx)` receives it.
+""".
+-spec join(binary(), map(), map()) -> {ok, map()} | {error, term()}.
+join(PlayerId, Ctx, #{lua_state := LuaSt, game_state := GS} = State) when is_map(Ctx) ->
+    %% Erlang maps must be encoded before they cross into Luerl - GS is
+    %% already a Lua value, but Ctx arrives raw from the client.
+    {EncCtx, LuaSt0} = luerl:encode(Ctx, LuaSt),
+    case asobi_lua_loader:call(join, [PlayerId, GS, EncCtx], LuaSt0, ?JOIN_TIMEOUT) of
         {ok, [GS1 | _], LuaSt1} ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
         {error, Reason} ->
