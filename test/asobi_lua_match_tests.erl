@@ -22,6 +22,9 @@ lua_match_test_() ->
         {"init fails with bad script", fun init_bad_script/0},
         {"init fails with missing script", fun init_missing_script/0},
         {"join adds player to state", fun join_adds_player/0},
+        {"join/3 passes the client context to lua", fun join_ctx_reaches_lua/0},
+        {"join/3 context is optional for a two-arg lua join", fun join_ctx_ignored_by_old_script/0},
+        {"join/2 still works and sends an empty context", fun join_two_arg_sends_empty_ctx/0},
         {"leave removes player", fun leave_removes_player/0},
         {"handle_input updates player position", fun input_moves_player/0},
         {"handle_input handles boon pick", fun input_boon_pick/0},
@@ -60,6 +63,35 @@ init_bad_script() ->
 init_missing_script() ->
     Config = #{lua_script => fixture("nonexistent.lua")},
     ?assertError({lua_load_failed, _, _}, asobi_lua_match:init(Config)).
+
+join_ctx_reaches_lua() ->
+    %% The whole point of the join context: a Lua game can gate entry on
+    %% something the client presented. Without join/3 on this bridge the ctx
+    %% is silently dropped and every Lua game is unable to implement a join
+    %% code, however the guides describe it.
+    Config = #{lua_script => fixture("join_ctx.lua")},
+    {ok, State0} = asobi_lua_match:init(Config),
+    {ok, State1} = asobi_lua_match:join(~"p1", #{~"code" => ~"OPEN"}, State0),
+    #{~"last_code" := Code} = asobi_lua_match:get_state(~"p1", State1),
+    ?assertEqual(~"OPEN", Code),
+
+    {ok, State2} = asobi_lua_match:join(~"p2", #{~"code" => ~"WRONG"}, State1),
+    #{~"rejected" := Rejected} = asobi_lua_match:get_state(~"p2", State2),
+    ?assertEqual(1, Rejected).
+
+join_ctx_ignored_by_old_script() ->
+    %% A script declaring `function join(player_id, state)` must keep working
+    %% when called with three arguments - Lua discards the extra one.
+    {ok, State0} = init_match(),
+    {ok, State1} = asobi_lua_match:join(~"player1", #{~"code" => ~"ignored"}, State0),
+    ?assert(is_map(asobi_lua_match:get_state(~"player1", State1))).
+
+join_two_arg_sends_empty_ctx() ->
+    Config = #{lua_script => fixture("join_ctx.lua")},
+    {ok, State0} = asobi_lua_match:init(Config),
+    {ok, State1} = asobi_lua_match:join(~"p1", State0),
+    #{~"rejected" := Rejected} = asobi_lua_match:get_state(~"p1", State1),
+    ?assertEqual(1, Rejected, "no ctx means no code, so this script refuses").
 
 join_adds_player() ->
     {ok, State0} = init_match(),

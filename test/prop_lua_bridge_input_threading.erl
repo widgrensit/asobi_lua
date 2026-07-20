@@ -62,7 +62,8 @@ run_plan(Plan) ->
         undefined ->
             io:format(user, "fixture missing zone (0,0): ~p~n", [ZoneStates]),
             false;
-        Z0 ->
+        Z0Raw ->
+            Z0 = asobi_lua_world:init_zone_state(fixture_config(), Z0Raw),
             try
                 exec(Plan, Z0, #{}, #{}, false)
             after

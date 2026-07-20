@@ -32,6 +32,7 @@ strategy       = "fill"                     -- optional, "fill" | "skill_based"
 bots           = { script = "bots/ai.lua" } -- optional
 game_type      = "world"                    -- optional, "match" (default) or "world"
 state_strategy = "shared"                   -- optional, "shared" picks asobi_lua_match_shared (encode-once broadcast)
+guest_auth     = true                       -- optional, offer anonymous no-account play (needs an operator pepper; ADR 0004)
 
 -- World mode config (large session games, game_type = "world"):
 tick_rate               = 50              -- optional, ms per world tick (default 50 = 20 Hz)
@@ -52,6 +53,10 @@ Setting `game_type = "world"` routes the script through the `asobi_lua_world`
 bridge (zone_tick/2 + handle_input/3 returning entities). Defaults to "match",
 which uses the `asobi_lua_match` bridge (tick/1 + wrapped-state callbacks).
 
+`guest_auth` is read from `match.lua` in single-mode and from `config.lua` (the
+manifest) in multi-mode. It only *declares* intent; guest auth is on iff the
+operator also supplies a >= 32-byte pepper (ADR 0004).
+
 Bot scripts can export a `names` list that the platform reads after loading:
 
 ```lua
@@ -59,12 +64,16 @@ names = {"Spark", "Blitz", "Volt"}
 ```
 """.
 
--export([maybe_load_game_config/0]).
+-export([maybe_load_game_config/0, apply_guest_auth/1]).
+-ifdef(TEST).
+-export([safe_join/2]).
+-endif.
 
 -spec maybe_load_game_config() -> ok | {error, term()}.
 maybe_load_game_config() ->
     GameDir = application:get_env(asobi, game_dir, ~"/app/game"),
     GameDirStr = to_string(GameDir),
+    _ = apply_guest_auth(GameDirStr),
     ConfigPath = filename:join(GameDirStr, "config.lua"),
     MatchPath = filename:join(GameDirStr, "match.lua"),
     case {filelib:is_regular(ConfigPath), filelib:is_regular(MatchPath)} of
@@ -75,6 +84,35 @@ maybe_load_game_config() ->
         {false, false} ->
             ok
     end.
+
+%% The game opts into anonymous guest auth by declaring `guest_auth = true` in
+%% its config script (config.lua for multi-mode, else match.lua). We read that
+%% global and flip the asobi app-env flag; the operator still has to supply a
+%% >= 32-byte guest_verifier_pepper, so guest auth is on iff BOTH agree (ADR
+%% 0004). Best-effort: any error just leaves the flag at its `false` default.
+%% Shared with asobi_engine's bundle loader so managed cloud behaves the same.
+-spec apply_guest_auth(string() | binary()) -> ok.
+apply_guest_auth(GameDir) ->
+    GameDirStr = to_string(GameDir),
+    ConfigPath = filename:join(GameDirStr, "config.lua"),
+    MatchPath = filename:join(GameDirStr, "match.lua"),
+    Script =
+        case filelib:is_regular(ConfigPath) of
+            true -> ConfigPath;
+            false -> MatchPath
+        end,
+    Declared =
+        case filelib:is_regular(Script) of
+            false ->
+                false;
+            true ->
+                St0 = asobi_lua_loader:init_sandboxed(),
+                case do_file(Script, St0) of
+                    {ok, _Results, St1} -> read_global_bool(~"guest_auth", St1) =:= true;
+                    {error, _} -> false
+                end
+        end,
+    application:set_env(asobi, guest_auth, Declared).
 
 %% --- Multi-mode: config.lua maps mode names to script paths ---
 
@@ -99,10 +137,19 @@ build_modes_from_manifest(GameDir, PropList) when is_list(PropList) ->
     Results = lists:map(
         fun
             ({ModeName, ScriptRel}) when is_binary(ModeName), is_binary(ScriptRel) ->
-                ScriptAbs = filename:join(GameDir, binary_to_list(ScriptRel)),
-                case load_match_config(ScriptAbs) of
-                    {ok, ModeConfig} ->
-                        {ok, {ModeName, ModeConfig}};
+                %% H1 (2026-05-19): config.lua is operator-trusted but its
+                %% values flow through unmodified to file:read_file +
+                %% Lua eval. Anchor every mode->script entry inside GameDir
+                %% so a stray "../" cannot trick the runtime into loading
+                %% an arbitrary readable file as Lua.
+                case safe_join(GameDir, ScriptRel) of
+                    {ok, ScriptAbs} ->
+                        case load_match_config(ScriptAbs) of
+                            {ok, ModeConfig} ->
+                                {ok, {ModeName, ModeConfig}};
+                            {error, Reason} ->
+                                {error, {ModeName, Reason}}
+                        end;
                     {error, Reason} ->
                         {error, {ModeName, Reason}}
                 end;
@@ -268,16 +315,72 @@ maybe_add_bots(Config, BotProps, ScriptPath) when is_list(BotProps) ->
         undefined ->
             Config;
         BotScript when is_binary(BotScript) ->
-            AbsBot = filename:join(BaseDir, binary_to_list(BotScript)),
-            Config#{
-                bots => #{
-                    enabled => true,
-                    script => unicode:characters_to_binary(AbsBot)
-                }
-            }
+            %% H1 (2026-05-19): the same anchoring applies here. match.lua
+            %% is operator-controlled but its bots.script string is what
+            %% the runtime hands to file:read_file; reject any segment that
+            %% escapes the match's own directory.
+            case safe_join(BaseDir, BotScript) of
+                {ok, AbsBot} ->
+                    Config#{
+                        bots => #{
+                            enabled => true,
+                            script => unicode:characters_to_binary(AbsBot)
+                        }
+                    };
+                {error, _} ->
+                    logger:warning(#{
+                        msg => ~"bots.script rejected: path escapes match dir",
+                        base_dir => unicode:characters_to_binary(BaseDir),
+                        script => BotScript
+                    }),
+                    Config
+            end
     end;
 maybe_add_bots(Config, _, _) ->
     Config.
+
+%% H1 (2026-05-19): anchor a Lua-supplied relative path inside Base. Reject
+%% absolute paths, `..` segments, and anything whose `filename:absname/1`
+%% normalisation escapes the base directory. Returns the absolute path on
+%% success.
+-spec safe_join(string() | binary(), binary()) ->
+    {ok, string()} | {error, binary()}.
+safe_join(Base, RelBin) when is_binary(RelBin) ->
+    case is_safe_relative(RelBin) of
+        false ->
+            {error, ~"script path must be relative and may not contain '..'"};
+        true ->
+            BaseStr = to_string(Base),
+            BaseAbs = to_chars(filename:absname(BaseStr)),
+            Joined = to_chars(
+                filename:absname(filename:join(BaseAbs, binary_to_list(RelBin)))
+            ),
+            case lists:prefix(BaseAbs ++ "/", Joined) of
+                true -> {ok, Joined};
+                false -> {error, ~"script path escapes game directory"}
+            end
+    end.
+
+-spec to_chars(file:filename_all()) -> string().
+to_chars(B) when is_binary(B) -> binary_to_list(B);
+to_chars(L) when is_list(L) -> L.
+
+-spec is_safe_relative(binary()) -> boolean().
+is_safe_relative(<<>>) ->
+    false;
+is_safe_relative(<<"/", _/binary>>) ->
+    false;
+is_safe_relative(Bin) ->
+    Parts = binary:split(Bin, ~"/", [global]),
+    lists:all(
+        fun
+            (<<>>) -> false;
+            (~"..") -> false;
+            (~".") -> false;
+            (_) -> true
+        end,
+        Parts
+    ).
 
 %% --- Apply to app env ---
 
@@ -299,8 +402,10 @@ apply_game_modes(Modes) ->
 
 %% M-3: a malicious or buggy config.lua could otherwise hang application
 %% start. The wrapper kills runaway scripts after CONFIG_TIMEOUT_MS so a
-%% bad manifest never blocks the boot process.
+%% bad manifest never blocks the boot process, and caps heap so an
+%% allocation bomb in an untrusted bundle cannot exhaust node memory.
 -define(CONFIG_TIMEOUT_MS, 2000).
+-define(CONFIG_MAX_HEAP_WORDS, 5_000_000).
 
 do_file(Path, St) ->
     case file:read_file(Path) of
@@ -315,27 +420,50 @@ do_file(Path, St) ->
 do_with_timeout_results(Code, St, TimeoutMs) ->
     Self = self(),
     Ref = make_ref(),
-    Pid = spawn(fun() ->
-        Result =
-            try luerl:do(binary_to_list(Code), St) of
-                {ok, Results, St1} -> {ok, Results, St1};
-                {error, Errors, _} -> {error, {lua_error, Errors}};
-                {lua_error, Reason, _} -> {error, {lua_error, Reason}}
-            catch
-                error:{lua_error, Reason, _} -> {error, {lua_error, Reason}};
-                error:Reason -> {error, Reason}
-            end,
-        Self ! {Ref, Result}
-    end),
+    SpawnOpts = [
+        monitor,
+        {max_heap_size, #{
+            size => ?CONFIG_MAX_HEAP_WORDS,
+            kill => true,
+            error_logger => true,
+            include_shared_binaries => false
+        }}
+    ],
+    {Pid, MonRef} = spawn_opt(
+        fun() ->
+            Result =
+                try luerl:do(binary_to_list(Code), St) of
+                    {ok, Results, St1} -> {ok, Results, St1};
+                    {error, Errors, _} -> {error, {lua_error, Errors}};
+                    {lua_error, Reason, _} -> {error, {lua_error, Reason}}
+                catch
+                    error:{lua_error, Reason, _} -> {error, {lua_error, Reason}};
+                    error:Reason -> {error, Reason}
+                end,
+            Self ! {Ref, Result}
+        end,
+        SpawnOpts
+    ),
     receive
-        {Ref, Result} -> Result
+        {Ref, Result} ->
+            erlang:demonitor(MonRef, [flush]),
+            Result;
+        {'DOWN', MonRef, process, Pid, killed} ->
+            {error, heap_exhausted};
+        {'DOWN', MonRef, process, Pid, Reason} ->
+            {error, {worker_exit, Reason}}
     after TimeoutMs ->
         exit(Pid, kill),
         receive
-            {Ref, _} -> ok
-        after 0 -> ok
-        end,
-        {error, timeout}
+            {Ref, _} ->
+                erlang:demonitor(MonRef, [flush]),
+                {error, timeout};
+            {'DOWN', MonRef, process, Pid, _} ->
+                {error, timeout}
+        after 0 ->
+            erlang:demonitor(MonRef, [flush]),
+            {error, timeout}
+        end
     end.
 
 read_global_int(Name, St) ->

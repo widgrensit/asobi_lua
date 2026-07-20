@@ -4,6 +4,13 @@ Asobi includes built-in bot support. Bots run as server-side processes that
 join matches as regular players -- no fake clients, no network overhead. The
 AI logic runs in the same tick loop as the game.
 
+## When to use bots
+
+- Fill empty slots so matches start immediately instead of waiting for a full lobby.
+- A tutorial or single-player sandbox with scripted opponents.
+- Load-testing your tick loop without spawning real WebSocket sessions.
+- Replay / record-and-replay testing.
+
 ## How It Works
 
 1. A player queues for matchmaking
@@ -39,12 +46,10 @@ end
 The platform reads `names` from your bot script at runtime. Bot names are
 prefixed with `bot_` (e.g., `bot_Spark`).
 
-Platform-level bot tuning is controlled via environment variables:
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ASOBI_BOT_FILL_AFTER` | `8000` | Milliseconds before bots fill queue |
-| `ASOBI_BOT_MIN_PLAYERS` | `match_size` | Fill up to this many players |
+The spawner checks the queue every 8 seconds (a fixed interval, not tunable) and
+fills a waiting match with bots up to the mode's `min_players`. Both settings
+below live in the game mode's `bots` map — there are no bot environment
+variables.
 
 ### Erlang (sys.config)
 
@@ -57,7 +62,6 @@ For Erlang OTP projects, configure bots in `sys.config`:
         match_size => 4,
         bots => #{
             enabled => true,
-            fill_after_ms => 8000,
             min_players => 4,
             script => <<"game/bots/chaser.lua">>
         }
@@ -72,7 +76,13 @@ defaults to `["Spark", "Blitz", "Volt", "Neon", "Pulse"]`.
 
 A bot script defines a single function: `think(bot_id, state)`. It receives
 the current game state and returns an input table -- the same format a real
-player would send.
+player would send. That is the whole callback surface: a bot script has no
+`on_join` / `on_leave` / `on_message` hooks; it only ever produces the next
+input from the current state (plus an optional `names` list, below).
+
+Since the bot only decides from `state`, difficulty is a property of the
+script, not a config knob: throttle a reaction-time delay or degrade the target
+selection by keying private per-bot state off `bot_id` in a module-level table.
 
 ```lua
 -- game/bots/chaser.lua
@@ -197,3 +207,8 @@ end
 
 Clients receive bot players in the normal game state. Whether to show them
 differently (e.g., "AI" tag) is up to the client.
+
+## Next steps
+
+- [Lua scripting](lua-scripting.md) - the `game.*` API a bot's `think` shares with match logic.
+- [Trust model](security-trust-model.md) - a bot's `think` runs bounded, like any callback.

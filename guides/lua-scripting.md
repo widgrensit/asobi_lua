@@ -92,7 +92,7 @@ services:
     depends_on:
       postgres: { condition: service_healthy }
     ports:
-      - "8080:8080"
+      - "8084:8084"
     volumes:
       - ./lua:/app/game:ro
     environment:
@@ -148,6 +148,7 @@ match_size   = 4                          -- required: min players to start
 max_players  = 10                         -- optional: max per match (defaults to match_size)
 strategy     = "fill"                     -- optional: "fill" or "skill_based"
 bots         = { script = "bots/ai.lua" } -- optional: enable bot filling
+guest_auth   = true                       -- optional: allow anonymous guest play
 ```
 
 | Global | Required | Default | Description |
@@ -156,11 +157,16 @@ bots         = { script = "bots/ai.lua" } -- optional: enable bot filling
 | `max_players` | no | `match_size` | Maximum players per match |
 | `strategy` | no | `"fill"` | Matchmaking strategy |
 | `bots` | no | none | Bot configuration (see [Bots](lua-bots.md)) |
+| `guest_auth` | no | `false` | Enable anonymous guest play. Also requires an operator-supplied pepper; on iff both are present (asobi ADR 0004) |
 | `lazy_zones` | no | auto | On-demand zone loading (auto-enabled for grids > 100) |
 | `zone_idle_timeout` | no | 30000 | Milliseconds before an idle zone is reaped |
 | `max_active_zones` | no | 10000 | Maximum concurrent zones in memory |
 | `spatial_grid_cell_size` | no | none | Cell size for spatial grid indexing (enables grid acceleration) |
 | `cold_tick_divisor` | no | 10 | Tick rate divisor for cold (unoccupied) zones |
+
+For a single-mode game these globals live in `match.lua`. In a multi-mode game
+(a `config.lua` manifest that maps modes to match scripts), deployment-wide
+settings such as `guest_auth` go in `config.lua`, not the per-mode scripts.
 
 ## Using with Erlang Projects
 
@@ -559,5 +565,6 @@ still work for client-side filtering without a zone process.
 ## Next Steps
 
 - [Bots](lua-bots.md) -- add AI-controlled players to your game
-- [Configuration](configuration.md) -- all Asobi configuration options
-- [WebSocket Protocol](websocket-protocol.md) -- client-server message format
+- [Self-hosting](self-hosting.md) -- production deployment and live updates
+- [Configuration](https://asobi.dev/docs/configuration) -- all Asobi configuration options
+- [WebSocket Protocol](https://asobi.dev/docs/protocols/websocket) -- client-server message format

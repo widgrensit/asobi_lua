@@ -17,7 +17,7 @@ built on top of Erlang/OTP 28.x. It expects:
 - A Postgres 17+ database it can read and write (sessions, world
   snapshots, leaderboards, IAP receipts).
 - A directory mounted at `/app/game/` containing your Lua scripts.
-- TCP `:8080` reachable by your matchmaker / game clients.
+- TCP `:8084` reachable by your matchmaker / game clients.
 
 That's it. No sidecars, no message bus, no Redis. The container is
 stateless apart from `/app/game/`; restarting it loses no game state
@@ -151,7 +151,7 @@ services:
       - /srv/asobi/game:/app/game:ro
     secrets: [db_password]
     ports:
-      - "8080:8080"
+      - "8084:8084"
     restart: unless-stopped
 
 secrets:
