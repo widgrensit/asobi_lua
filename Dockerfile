@@ -1,4 +1,4 @@
-FROM erlang:28.4.2-slim AS builder
+FROM erlang:29.0.3-slim AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git ca-certificates curl && \
