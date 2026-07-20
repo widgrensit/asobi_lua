@@ -22,7 +22,7 @@ The Lua script must define these functions:
 
 ```lua
 function init(config)        -- return initial game state table
-function join(player_id, state)       -- return updated state
+function join(player_id, state, ctx)  -- ctx is the client join context; return updated state
 function leave(player_id, state)      -- return updated state
 function handle_input(player_id, input, state) -- return updated state
 function tick(state)         -- return state, or state + finished flag
@@ -37,7 +37,7 @@ function vote_resolved(template, result, state) -- return updated state
 
 -include_lib("kernel/include/logger.hrl").
 
--export([init/1, join/2, leave/2, handle_input/3, tick/1, get_state/2]).
+-export([init/1, join/2, join/3, leave/2, handle_input/3, tick/1, get_state/2]).
 -export([vote_requested/1, vote_resolved/3]).
 
 %% A sandboxed Lua callback runs in a child process so the parent
@@ -105,8 +105,28 @@ init(Config) ->
     end.
 
 -spec join(binary(), map()) -> {ok, map()} | {error, term()}.
-join(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
-    case asobi_lua_loader:call(join, [PlayerId, GS], LuaSt, ?JOIN_TIMEOUT) of
+join(PlayerId, State) ->
+    join(PlayerId, #{}, State).
+
+-doc """
+Join carrying the client-supplied join context (asobi's optional `join/3`).
+
+The context is passed to the Lua `join` as a third argument, so a script
+declaring `function join(player_id, state)` keeps working unchanged - Lua
+discards extra arguments - and one declaring
+`function join(player_id, state, ctx)` receives it.
+
+Without this, `ctx` would reach asobi, find no `join/3` on the Lua bridge,
+fall back to `join/2` and be silently discarded - so every Lua game would
+be unable to implement join codes, invites or passwords despite the docs
+saying otherwise.
+""".
+-spec join(binary(), map(), map()) -> {ok, map()} | {error, term()}.
+join(PlayerId, Ctx, #{lua_state := LuaSt, game_state := GS} = State) when is_map(Ctx) ->
+    %% Erlang maps must be encoded before they cross into Luerl - GS is
+    %% already a Lua value, but Ctx arrives raw from the client.
+    {EncCtx, LuaSt0} = luerl:encode(Ctx, LuaSt),
+    case asobi_lua_loader:call(join, [PlayerId, GS, EncCtx], LuaSt0, ?JOIN_TIMEOUT) of
         {ok, [GS1 | _], LuaSt1} ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
         {error, Reason} ->
