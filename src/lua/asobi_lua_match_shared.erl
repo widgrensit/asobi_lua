@@ -13,7 +13,7 @@ delegated to it directly.
 
 -behaviour(asobi_match).
 
--export([init/1, join/2, leave/2, handle_input/3, tick/1, get_state/1]).
+-export([init/1, join/2, join/3, leave/2, handle_input/3, tick/1, get_state/1]).
 -export([vote_requested/1, vote_resolved/3]).
 
 -define(GET_STATE_TIMEOUT, 100).
@@ -23,6 +23,9 @@ init(Config) -> asobi_lua_match:init(Config).
 
 -spec join(binary(), map()) -> {ok, map()} | {error, term()}.
 join(PlayerId, State) -> asobi_lua_match:join(PlayerId, State).
+
+-spec join(binary(), map(), map()) -> {ok, map()} | {error, term()}.
+join(PlayerId, Ctx, State) -> asobi_lua_match:join(PlayerId, Ctx, State).
 
 -spec leave(binary(), map()) -> {ok, map()}.
 leave(PlayerId, State) -> asobi_lua_match:leave(PlayerId, State).
