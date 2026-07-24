@@ -131,6 +131,7 @@ join(PlayerId, Ctx, #{lua_state := LuaSt, game_state := GS} = State) when is_map
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
         {error, Reason} ->
             ?LOG_WARNING(#{msg => ~"lua join error", player_id => PlayerId, reason => Reason}),
+            _ = asobi_lua_game_error:emit(join, Reason, maps:get(script, State, ~"<unknown>")),
             {error, Reason}
     end.
 
@@ -141,6 +142,7 @@ leave(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
         {error, Reason} ->
             ?LOG_WARNING(#{msg => ~"lua leave error", player_id => PlayerId, reason => Reason}),
+            _ = asobi_lua_game_error:emit(leave, Reason, maps:get(script, State, ~"<unknown>")),
             {ok, State}
     end.
 
@@ -156,6 +158,9 @@ handle_input(PlayerId, Input, #{lua_state := LuaSt, game_state := GS} = State) -
             ?LOG_WARNING(#{
                 msg => ~"lua input error", player_id => PlayerId, reason => Reason
             }),
+            _ = asobi_lua_game_error:emit(
+                handle_input, Reason, maps:get(script, State, ~"<unknown>")
+            ),
             {ok, State}
     end.
 
@@ -172,9 +177,11 @@ tick(State0) ->
             end;
         {error, timeout} ->
             ?LOG_ERROR(#{msg => ~"lua tick timeout", script => maps:get(script, State)}),
+            _ = asobi_lua_game_error:emit(tick, timeout, maps:get(script, State, ~"<unknown>")),
             {ok, State};
         {error, Reason} ->
             ?LOG_ERROR(#{msg => ~"lua tick error", reason => Reason}),
+            _ = asobi_lua_game_error:emit(tick, Reason, maps:get(script, State, ~"<unknown>")),
             {ok, State}
     end.
 
