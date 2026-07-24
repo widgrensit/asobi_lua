@@ -470,7 +470,10 @@ log_lua_error(Callback, Reason, StateOrZoneState) ->
         severity => Severity,
         script => Script,
         reason => Reason
-    }).
+    }),
+    %% Public game-error signal; only bounded PII-free context crosses it (the
+    %% raw Reason stays in the local log above).
+    asobi_lua_game_error:emit(Callback, Reason, Script).
 
 decode_position(PosTable, LuaSt) ->
     case luerl:decode(PosTable, LuaSt) of
