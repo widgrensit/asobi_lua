@@ -56,7 +56,7 @@ per-tick stat overhead can set `asobi_lua.reload_mode` (or the
 
 -include_lib("kernel/include/logger.hrl").
 
--export([maybe_hot_reload/1]).
+-export([maybe_hot_reload/1, reload_mode/0]).
 
 %% Reload runs script-author code under a wall-clock budget. A `while true do
 %% end` in the file body would otherwise hang the calling gen_server forever
