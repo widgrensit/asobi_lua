@@ -19,8 +19,13 @@ formation). It shares the hot-reload dial: with `asobi_lua_reload:reload_mode()`
 """.
 -behaviour(gen_server).
 
+-include_lib("kernel/include/logger.hrl").
+
 -export([start_link/0]).
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2]).
+-ifdef(TEST).
+-export([scan/0]).
+-endif.
 
 -define(DEFAULT_INTERVAL, 1500).
 
@@ -77,11 +82,10 @@ interval() ->
 
 %% path => mtime for every watched file. Missing files map to 0, so a
 %% create/delete registers as a change too.
--spec scan() -> #{string() => term()}.
+-spec scan() -> map().
 scan() ->
-    maps:from_list([{F, filelib:last_modified(F)} || F <- watched_files()]).
+    #{F => filelib:last_modified(F) || F <- watched_files()}.
 
--spec watched_files() -> [string()].
 watched_files() ->
     GameDir = to_string(application:get_env(asobi, game_dir, ~"/app/game")),
     Manifest = [
@@ -105,24 +109,22 @@ watched_files() ->
 %% game_modes (the loader is all-or-nothing) and adopt the new mtimes anyway, so
 %% a broken file is not retried every tick - we wait for the next edit. Mirrors
 %% asobi_lua_reload's failure discipline.
--spec reload(#{string() => term()}) -> #{string() => term()}.
+-spec reload(map()) -> map().
 reload(Current) ->
     case asobi_lua_config:reload_game_modes() of
         ok ->
-            logger:notice(#{msg => ~"game config reloaded (mode-shape change)"});
+            ?LOG_NOTICE(#{msg => ~"game config reloaded (mode-shape change)"});
         {error, Reason} ->
-            logger:warning(#{
+            ?LOG_WARNING(#{
                 msg => ~"game config reload failed; keeping last-good",
                 error => Reason
             })
     end,
     Current.
 
--spec to_string(binary() | string()) -> string().
 to_string(B) when is_binary(B) -> binary_to_list(B);
 to_string(L) when is_list(L) -> L.
 
--spec to_path(term()) -> string() | undefined.
 to_path(B) when is_binary(B) -> binary_to_list(B);
 to_path(L) when is_list(L) -> L;
 to_path(_) -> undefined.

@@ -54,14 +54,13 @@ unchanged_is_noop() ->
     application:set_env(asobi, game_dir, Dir),
     ok = asobi_lua_config:maybe_load_game_config(),
 
-    %% Change the file on disk but pass the CURRENT mtimes as the snapshot, so
-    %% the watcher sees no delta and skips the reload.
-    Current = current_mtimes(Dir, Path),
+    %% Snapshot the exact mtimes the watcher would see, change the content, then
+    %% pin the file's mtime back to the snapshot value, so scan() shows no delta
+    %% and the reload is skipped. Deterministic (no second-boundary race).
+    Snapshot = asobi_lua_config_watcher:scan(),
     ok = file:write_file(Path, ~"match_size = 9\n"),
-    _ = file:change_time(Path, calendar:local_time()),
-    {noreply, _} = asobi_lua_config_watcher:handle_info(
-        tick, #{interval => 100000, mtimes => Current}
-    ),
+    ok = file:change_time(Path, maps:get(Path, Snapshot)),
+    tick(Snapshot),
     ?assertEqual(2, match_size()).
 
 %% --- helpers ---
@@ -77,14 +76,12 @@ tick(Mtimes) ->
 stale_mtimes() ->
     #{"/nonexistent/stale/path" => 0}.
 
-current_mtimes(Dir, Path) ->
-    #{
-        filename:join(Dir, "config.lua") => filelib:last_modified(filename:join(Dir, "config.lua")),
-        Path => filelib:last_modified(Path)
-    }.
-
 match_size() ->
-    Modes = application:get_env(asobi, game_modes, #{}),
+    Modes =
+        case application:get_env(asobi, game_modes, #{}) of
+            M when is_map(M) -> M;
+            _ -> #{}
+        end,
     [Mode | _] = maps:values(Modes),
     maps:get(match_size, Mode).
 
