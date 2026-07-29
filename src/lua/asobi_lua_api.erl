@@ -165,7 +165,7 @@ fun_send() ->
     fun(Args, St) ->
         case decode_args(Args, St) of
             [PlayerId, Message] when is_binary(PlayerId) ->
-                asobi_presence:send(PlayerId, {game_message, to_map(Message)}),
+                asobi_presence:send(PlayerId, {game_message, to_storage_value(Message)}),
                 {[true], St};
             _ ->
                 error_result(~"send requires (player_id, message)", St)

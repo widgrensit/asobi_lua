@@ -22,6 +22,7 @@ api_test_() ->
         {"game.id returns binary", fun game_id/0},
         {"game.broadcast forwards to match server", fun game_broadcast/0},
         {"game.send forwards to presence", fun game_send/0},
+        {"game.send preserves a plain string message", fun game_send_string/0},
         {"game.economy.grant calls engine", fun game_economy_grant/0},
         {"game.economy.debit calls engine", fun game_economy_debit/0},
         {"game.economy.balance returns wallets", fun game_economy_balance/0},
@@ -153,6 +154,17 @@ game_send() ->
     Code = "return game.send('p1', { kind = 'hello' })",
     {ok, [true | _], _} = eval(Code, St),
     ?assert(meck:called(asobi_presence, send, [~"p1", '_'])).
+
+%% A plain string message must reach the player as-is, not silently
+%% collapse to an empty map (asobi#233 - game.send's message previously
+%% went through to_map/1, which drops anything that isn't a table).
+game_send_string() ->
+    St = install_api(),
+    Code = "return game.send('p1', 'jij bent speler nummer 3')",
+    {ok, [true | _], _} = eval(Code, St),
+    ?assert(
+        meck:called(asobi_presence, send, [~"p1", {game_message, ~"jij bent speler nummer 3"}])
+    ).
 
 game_economy_balance() ->
     St = install_api(),
