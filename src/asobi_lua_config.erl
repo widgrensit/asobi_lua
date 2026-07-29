@@ -64,16 +64,24 @@ names = {"Spark", "Blitz", "Volt"}
 ```
 """.
 
--export([maybe_load_game_config/0, apply_guest_auth/1]).
+-export([maybe_load_game_config/0, reload_game_modes/0, apply_guest_auth/1]).
 -ifdef(TEST).
 -export([safe_join/2]).
 -endif.
 
 -spec maybe_load_game_config() -> ok | {error, term()}.
 maybe_load_game_config() ->
-    GameDir = application:get_env(asobi, game_dir, ~"/app/game"),
-    GameDirStr = to_string(GameDir),
+    GameDirStr = to_string(application:get_env(asobi, game_dir, ~"/app/game")),
     _ = apply_guest_auth(GameDirStr),
+    reload_game_modes().
+
+%% Refresh only the game_modes registry from the mode scripts, WITHOUT
+%% re-deriving guest_auth. The config watcher (asobi#232) calls this on a live
+%% mode-shape edit, so guest-auth posture (ADR 0004's two-key AND) stays a
+%% boot-only decision that a bundle write cannot flip at runtime.
+-spec reload_game_modes() -> ok | {error, term()}.
+reload_game_modes() ->
+    GameDirStr = to_string(application:get_env(asobi, game_dir, ~"/app/game")),
     ConfigPath = filename:join(GameDirStr, "config.lua"),
     MatchPath = filename:join(GameDirStr, "match.lua"),
     case {filelib:is_regular(ConfigPath), filelib:is_regular(MatchPath)} of

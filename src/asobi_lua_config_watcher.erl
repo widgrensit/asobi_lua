@@ -32,7 +32,13 @@ start_link() ->
 init([]) ->
     Interval = interval(),
     erlang:send_after(Interval, self(), tick),
-    {ok, #{interval => Interval, mtimes => scan()}}.
+    %% Don't even scan on a sealed/off node: reload_mode=off means zero polling.
+    Mtimes =
+        case asobi_lua_reload:reload_mode() of
+            off -> #{};
+            auto -> scan()
+        end,
+    {ok, #{interval => Interval, mtimes => Mtimes}}.
 
 -spec handle_call(term(), gen_server:from(), map()) -> {reply, term(), map()}.
 handle_call(_Request, _From, State) ->
@@ -83,11 +89,15 @@ watched_files() ->
         filename:join(GameDir, "match.lua")
     ],
     Modes = ensure_map(application:get_env(asobi, game_modes, #{})),
+    %% Fail soft on a hand-written game_modes with a non-string script path: skip
+    %% the bad entry rather than crash the watcher (and, via the sup, the app).
     Scripts = [
-        to_string(Path)
+        P
      || {_Mode, Cfg} <- maps:to_list(Modes),
         is_map(Cfg),
-        {lua, Path} <- [maps:get(module, Cfg, undefined)]
+        {lua, Path} <- [maps:get(module, Cfg, undefined)],
+        P <- [to_path(Path)],
+        P =/= undefined
     ],
     lists:usort(Manifest ++ Scripts).
 
@@ -97,7 +107,7 @@ watched_files() ->
 %% asobi_lua_reload's failure discipline.
 -spec reload(#{string() => term()}) -> #{string() => term()}.
 reload(Current) ->
-    case asobi_lua_config:maybe_load_game_config() of
+    case asobi_lua_config:reload_game_modes() of
         ok ->
             logger:notice(#{msg => ~"game config reloaded (mode-shape change)"});
         {error, Reason} ->
@@ -111,6 +121,11 @@ reload(Current) ->
 -spec to_string(binary() | string()) -> string().
 to_string(B) when is_binary(B) -> binary_to_list(B);
 to_string(L) when is_list(L) -> L.
+
+-spec to_path(term()) -> string() | undefined.
+to_path(B) when is_binary(B) -> binary_to_list(B);
+to_path(L) when is_list(L) -> L;
+to_path(_) -> undefined.
 
 -spec ensure_map(term()) -> map().
 ensure_map(M) when is_map(M) -> M;
