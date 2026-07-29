@@ -17,9 +17,16 @@ init([]) ->
     },
     Children = [
         bot_sup(),
-        bot_spawner_spec()
+        bot_spawner_spec(),
+        config_watcher_spec()
     ],
     {ok, {SupFlags, Children}}.
+
+config_watcher_spec() ->
+    #{
+        id => asobi_lua_config_watcher,
+        start => {asobi_lua_config_watcher, start_link, []}
+    }.
 
 bot_sup() ->
     #{
