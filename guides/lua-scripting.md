@@ -453,8 +453,11 @@ Your Lua scripts have access to:
   `ipairs`, `next`, `type`, `tostring`, `tonumber`, `pcall`, `error`,
   `assert`, `setmetatable`/`getmetatable`, `rawget`/`rawset`/`rawequal`/`rawlen`
 - **Time helpers**: `os.clock`, `os.date`, `os.difftime`, `os.time`
-- **`math.random(n)`**: integer in `[1, n]`. **`math.random(a, b)` is not
-  supported** — pass a single argument and bias it yourself.
+- **`math.random(n)`**: integer in `[1, n]`. **`math.random(a, b)`**:
+  integer in `[a, b]`; an empty interval (`a > b`) raises, as in
+  standard Lua. The RNG is auto-seeded per match, so
+  **`math.randomseed` has no effect** — calling it is harmless, but
+  scripts cannot rely on seeded determinism.
 - **`math.sqrt(n)`**: square root. Negative input returns `0.0`.
 - **`require("foo.bar")`**: loads `foo/bar.lua` relative to your game
   directory. Names are validated; `..`, `/`, and absolute paths are
