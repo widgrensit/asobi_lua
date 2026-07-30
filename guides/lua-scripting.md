@@ -562,6 +562,30 @@ Both return a list of `{id, x, y}` tables.
 The entity-table variants (`game.spatial.query_radius(entities, x, y, radius)`)
 still work for client-side filtering without a zone process.
 
+## Debugging Script Errors
+
+A runtime error in a callback never crashes the match: the server logs the
+error, keeps the previous state, and carries on. From the client that looks
+like the callback silently doing nothing. A common first-hour trap is
+`state.counter = state.counter + 1` when `init` never set `counter`, which
+fails every call with "bad arithmetic on nil".
+
+During development, set `ASOBI_DEV_ERRORS=true` on the container to have
+each failing `handle_input` also send a `game.error` event to the player
+whose input triggered it:
+
+```json
+{"type": "game.error", "payload": {
+    "callback": "handle_input",
+    "script": "match.lua",
+    "message": "bad arithmetic + on nil, 1"
+}}
+```
+
+Events are rate-limited to one per second per match. Leave the flag off in
+production (it is off by default): error messages can reveal script
+internals, and players should never see them.
+
 ## Next Steps
 
 - [Bots](lua-bots.md) -- add AI-controlled players to your game

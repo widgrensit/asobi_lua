@@ -155,11 +155,19 @@ spawn_position(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
 
 -spec zone_tick(map(), term()) -> {map(), term()}.
 zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
-    %% Pick up any lua_state updates that handle_input stashed earlier this tick.
+    %% Pick up any lua_state updates that handle_input stashed earlier this
+    %% tick. The dev-error rate-limit stamp must ride along too: asobi_zone's
+    %% canonical ZoneState0 never carries it, so dropping it here would reset
+    %% the limit every tick and turn a broken handler into a per-tick stream.
     ZoneState1 =
         case erlang:get(?PD_KEY) of
-            #{lua_state := LuaFromDict} -> ZoneState0#{lua_state => LuaFromDict};
-            _ -> ZoneState0
+            #{lua_state := LuaFromDict} = Stashed ->
+                maps:merge(
+                    ZoneState0#{lua_state => LuaFromDict},
+                    maps:with([dev_error_at], Stashed)
+                );
+            _ ->
+                ZoneState0
         end,
     %% Hot-reload the script if it changed on disk since the last tick.
     %% Mirrors asobi_lua_match's per-tick reload — keeps live worlds in sync
@@ -211,6 +219,10 @@ handle_input(PlayerId, Input, Entities) ->
                     {ok, decode_to_map(Ents1, LuaSt3)};
                 {error, Reason} ->
                     log_lua_error(handle_input, Reason, ZoneState),
+                    ZoneState1 = asobi_lua_dev_errors:maybe_notify(
+                        handle_input, Reason, PlayerId, ZoneState
+                    ),
+                    erlang:put(?PD_KEY, ZoneState1),
                     {ok, Entities}
             end;
         _ ->
@@ -464,15 +476,17 @@ log_lua_error(Callback, Reason, StateOrZoneState) ->
             timeout -> ~"timeout";
             _ -> ~"error"
         end,
+    %% The raw reason can embed player input via Lua error()/assert() and is
+    %% unbounded - log a classified, capped rendering so a failing callback
+    %% under input load cannot amplify into the logs.
     ?LOG_WARNING(#{
         msg => ~"lua callback failed",
         callback => Callback,
         severity => Severity,
         script => Script,
-        reason => Reason
+        reason_class => asobi_lua_game_error:reason_class(Reason),
+        detail => asobi_lua_game_error:format_reason(Reason)
     }),
-    %% Public game-error signal; only bounded PII-free context crosses it (the
-    %% raw Reason stays in the local log above).
     asobi_lua_game_error:emit(Callback, Reason, Script).
 
 decode_position(PosTable, LuaSt) ->
