@@ -61,5 +61,13 @@ ENV ASOBI_GUEST_VERIFIER_PEPPER=""
 # Default forces IPv4; set to "inet6" for IPv6-only Postgres networks.
 ENV ASOBI_DB_SOCKET_OPTS=inet
 
+# vm.args has `-setcookie ${ERLANG_COOKIE}`. Left unset, relx renders an
+# EMPTY value and erlexec silently consumes the next flag (+pc) as the
+# cookie, so `+pc unicode` never applies and bin/asobi_lua rpc/remote
+# can't attach. Distribution stays container-internal (-sname, no epmd
+# port exposed), so a static default is fine; override per deploy if you
+# expose distribution.
+ENV ERLANG_COOKIE=asobi_lua
+
 ENTRYPOINT ["tini", "--"]
 CMD ["bin/asobi_lua", "foreground"]
