@@ -65,7 +65,8 @@ init(Config) ->
     GameConfig = maps:get(game_config, Config, #{}),
     Ctx = #{
         match_id => maps:get(match_id, Config, undefined),
-        match_pid => self()
+        match_pid => self(),
+        script => ScriptPath
     },
     PreInstall = fun(St) -> asobi_lua_api:install(Ctx, St) end,
     case asobi_lua_loader:new(ScriptPath, ?INIT_TIMEOUT, PreInstall) of

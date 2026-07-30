@@ -223,9 +223,10 @@ strip_dangerous_globals(St) ->
     %% L-1: `print` and `eprint` are stripped here because Luerl's
     %% defaults call `io:format` directly to the BEAM stdout, which
     %% breaks the structured JSON log stream and lets a tight loop
-    %% flood the runtime's logging driver. There is currently no
-    %% in-script logging API; scripts surface diagnostics through game
-    %% state or broadcast events.
+    %% flood the runtime's logging driver. Scripts log through
+    %% `game.log` (asobi_lua_api), which routes structured reports
+    %% through the host logger behind a rate limit - closing exactly
+    %% the two holes print was removed for.
     Paths = [
         [~"os", ~"execute"],
         [~"os", ~"exit"],

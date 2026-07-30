@@ -460,6 +460,8 @@ Your Lua scripts have access to:
   directory. Names are validated; `..`, `/`, and absolute paths are
   rejected. Modules are cached, and `asobi_lua_match` clears the cache
   on hot-reload so changes to required files pick up.
+- **`game.log(level, message[, meta])`**: structured logging - see
+  [Logging](#logging) below. `print` is removed; use this instead.
 
 The following are removed from the Lua environment:
 
@@ -550,7 +552,7 @@ grid when `spatial_grid_cell_size` is set, falling back to brute-force scan.
 -- Find all entities within radius of a point
 local nearby = game.spatial.query_radius(100, 200, 50)
 for _, hit in ipairs(nearby) do
-    print(hit.id, hit.x, hit.y)
+    game.log("debug", "nearby entity", { id = hit.id, x = hit.x, y = hit.y })
 end
 
 -- Find all entities inside a rectangle
@@ -561,6 +563,34 @@ Both return a list of `{id, x, y}` tables.
 
 The entity-table variants (`game.spatial.query_radius(entities, x, y, radius)`)
 still work for client-side filtering without a zone process.
+
+## Logging
+
+`game.log` writes a structured line through the server's logger, so it shows
+up in the container's log stream and, on managed cloud, in the console log
+viewer for your environment (filter on `game.log`):
+
+```lua
+function handle_input(player_id, input, state)
+    game.log("info", "input received", { player = player_id, kind = input.kind })
+    -- ...
+    return state
+end
+```
+
+- Levels: `"debug"`, `"info"`, `"warn"`/`"warning"`, `"error"`. Anything
+  else returns `{ error = ... }`.
+- `message` can be a string or any value (tables are rendered as JSON).
+  Messages are capped at 500 characters.
+- `meta` is an optional table of key/values, capped at 2 KB.
+- Logging is rate-limited (30 lines per second per match or zone, with a
+  node-wide cap). Over budget, `game.log` returns `false` and the line is
+  dropped - so a log call in a tight tick loop degrades gracefully instead
+  of flooding the log stream.
+
+`print` does not exist in the sandbox; it was removed because it bypassed
+the structured log stream. `game.log` is the supported way to see what your
+server is doing.
 
 ## Debugging Script Errors
 

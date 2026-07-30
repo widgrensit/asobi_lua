@@ -754,12 +754,14 @@ zone_ctx(Config) ->
     #{
         zone_pid => self(),
         match_pid => maps:get(world_server_pid, Config, self()),
-        match_id => maps:get(match_id, GameConfig, maps:get(world_id, Config, undefined))
+        match_id => maps:get(match_id, GameConfig, maps:get(world_id, Config, undefined)),
+        script => maps:get(lua_script, GameConfig, undefined)
     }.
 
 -spec make_ctx(map()) -> map().
 make_ctx(Config) ->
     #{
         match_id => maps:get(match_id, Config, undefined),
-        match_pid => self()
+        match_pid => self(),
+        script => maps:get(lua_script, Config, undefined)
     }.

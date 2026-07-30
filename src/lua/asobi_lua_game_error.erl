@@ -15,7 +15,7 @@ for the same reason.
 
 -include_lib("kernel/include/logger.hrl").
 
--export([emit/3, script_basename/1, reason_class/1, format_reason/1]).
+-export([emit/3, script_basename/1, reason_class/1, format_reason/1, bound/1]).
 
 -define(MAX_MESSAGE_CHARS, 500).
 
@@ -85,10 +85,17 @@ format_reason(Other) ->
 format_term(Term) ->
     unicode:characters_to_binary(io_lib:format("~0tp", [Term])).
 
+-doc "Cap a binary at the shared 500-char rendering budget; non-binaries become `<<\"<unprintable>\">>`.".
+-spec bound(term()) -> binary().
 bound(Bin) when is_binary(Bin) ->
     case string:length(Bin) > ?MAX_MESSAGE_CHARS of
-        true -> string:slice(Bin, 0, ?MAX_MESSAGE_CHARS);
-        false -> Bin
+        true ->
+            case unicode:characters_to_binary(string:slice(Bin, 0, ?MAX_MESSAGE_CHARS)) of
+                Sliced when is_binary(Sliced) -> Sliced;
+                _ -> ~"<unprintable>"
+            end;
+        false ->
+            Bin
     end;
 bound(_) ->
     ~"<unprintable>".
