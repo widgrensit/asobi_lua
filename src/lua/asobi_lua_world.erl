@@ -211,6 +211,10 @@ handle_input(PlayerId, Input, Entities) ->
                     {ok, decode_to_map(Ents1, LuaSt3)};
                 {error, Reason} ->
                     log_lua_error(handle_input, Reason, ZoneState),
+                    ZoneState1 = asobi_lua_dev_errors:maybe_notify(
+                        handle_input, Reason, PlayerId, ZoneState
+                    ),
+                    erlang:put(?PD_KEY, ZoneState1),
                     {ok, Entities}
             end;
         _ ->

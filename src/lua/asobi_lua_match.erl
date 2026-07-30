@@ -161,7 +161,8 @@ handle_input(PlayerId, Input, #{lua_state := LuaSt, game_state := GS} = State) -
             _ = asobi_lua_game_error:emit(
                 handle_input, Reason, maps:get(script, State, ~"<unknown>")
             ),
-            {ok, State}
+            State1 = asobi_lua_dev_errors:maybe_notify(handle_input, Reason, PlayerId, State),
+            {ok, State1}
     end.
 
 -spec tick(map()) -> {ok, map()} | {finished, map(), map()}.

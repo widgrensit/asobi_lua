@@ -12,7 +12,7 @@ keep it in their own local log.
 
 -include_lib("kernel/include/logger.hrl").
 
--export([emit/3]).
+-export([emit/3, script_basename/1]).
 
 -doc "Emit `[asobi, error]` for a failed Lua callback; only bounded, PII-free context crosses the boundary.".
 %% Guarded: this runs on the per-tick Lua-error path, so a telemetry-layer fault
