@@ -17,7 +17,8 @@ dev_errors_test_() ->
         {"timeout reason gets a readable message", fun timeout_message/0},
         {"lua_error reason is formatted", fun lua_error_formatted/0},
         {"oversized message is bounded", fun message_bounded/0},
-        {"failing match handle_input notifies the player", fun match_input_notifies/0}
+        {"failing match handle_input notifies the player", fun match_input_notifies/0},
+        {"world handle_input rate limit survives a zone_tick", fun world_cross_tick_rate_limited/0}
     ]}.
 
 setup() ->
@@ -134,6 +135,26 @@ match_input_notifies() ->
     [{_, {_, send, [Player, {script_error, Payload}]}, ok}] = meck:history(asobi_presence),
     ?assertEqual(~"p1", Player),
     ?assertMatch({_, _}, binary:match(maps:get(~"message", Payload), ~"boom")).
+
+world_cross_tick_rate_limited() ->
+    application:set_env(asobi_lua, dev_errors, true),
+    Path = temp_script(
+        ~"""
+        function zone_tick(entities, zs) return entities, zs end
+        function handle_input(pid, input, entities) error('boom') end
+        """
+    ),
+    {ok, LuaSt} = asobi_lua_loader:new(Path),
+    ZoneState = #{lua_state => LuaSt, script => Path},
+    erlang:put({asobi_lua_world, zone_state}, ZoneState),
+    try
+        {ok, _} = asobi_lua_world:handle_input(~"p1", #{~"a" => 1}, #{}),
+        {_, _} = asobi_lua_world:zone_tick(#{}, ZoneState),
+        {ok, _} = asobi_lua_world:handle_input(~"p1", #{~"a" => 1}, #{}),
+        ?assertEqual(1, meck:num_calls(asobi_presence, send, '_'))
+    after
+        erlang:erase({asobi_lua_world, zone_state})
+    end.
 
 temp_script(Code) ->
     Name = "dev_errors_" ++ integer_to_list(erlang:unique_integer([positive])) ++ ".lua",

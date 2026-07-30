@@ -566,7 +566,7 @@ still work for client-side filtering without a zone process.
 
 A runtime error in a callback never crashes the match: the server logs the
 error, keeps the previous state, and carries on. From the client that looks
-like the callback silently doing nothing -- a common first-hour trap is
+like the callback silently doing nothing. A common first-hour trap is
 `state.counter = state.counter + 1` when `init` never set `counter`, which
 fails every call with "bad arithmetic on nil".
 

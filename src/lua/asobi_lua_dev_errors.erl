@@ -19,7 +19,6 @@ fail-open default, this flag leaks script internals, so it fails closed.
 %% One notification per window per bridge process - a tick-rate input loop
 %% against a broken handler must not become a per-input message stream.
 -define(WINDOW_MS, 1000).
--define(MAX_MESSAGE_CHARS, 500).
 
 -spec enabled() -> boolean().
 enabled() ->
@@ -61,34 +60,8 @@ notify(Callback, Reason, PlayerId, State) ->
                 {script_error, #{
                     ~"callback" => atom_to_binary(Callback, utf8),
                     ~"script" => Script,
-                    ~"message" => format_reason(Reason)
+                    ~"message" => asobi_lua_game_error:format_reason(Reason)
                 }}
             ),
             State#{dev_error_at => Now}
     end.
-
-format_reason(timeout) ->
-    ~"callback timed out";
-format_reason(heap_exhausted) ->
-    ~"callback exhausted its memory budget";
-format_reason({lua_error, LuaErr}) ->
-    Msg =
-        try
-            unicode:characters_to_binary(luerl_lib:format_error(LuaErr))
-        catch
-            _:_ -> format_term(LuaErr)
-        end,
-    bound(Msg);
-format_reason(Other) ->
-    bound(format_term(Other)).
-
-format_term(Term) ->
-    unicode:characters_to_binary(io_lib:format("~0tp", [Term])).
-
-bound(Bin) when is_binary(Bin) ->
-    case string:length(Bin) > ?MAX_MESSAGE_CHARS of
-        true -> string:slice(Bin, 0, ?MAX_MESSAGE_CHARS);
-        false -> Bin
-    end;
-bound(_) ->
-    ~"<unprintable>".

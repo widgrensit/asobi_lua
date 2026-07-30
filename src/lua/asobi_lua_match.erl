@@ -130,7 +130,12 @@ join(PlayerId, Ctx, #{lua_state := LuaSt, game_state := GS} = State) when is_map
         {ok, [GS1 | _], LuaSt1} ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
         {error, Reason} ->
-            ?LOG_WARNING(#{msg => ~"lua join error", player_id => PlayerId, reason => Reason}),
+            ?LOG_WARNING(#{
+                msg => ~"lua join error",
+                player_id => PlayerId,
+                reason_class => asobi_lua_game_error:reason_class(Reason),
+                detail => asobi_lua_game_error:format_reason(Reason)
+            }),
             _ = asobi_lua_game_error:emit(join, Reason, maps:get(script, State, ~"<unknown>")),
             {error, Reason}
     end.
@@ -141,7 +146,12 @@ leave(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
         {ok, [GS1 | _], LuaSt1} ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
         {error, Reason} ->
-            ?LOG_WARNING(#{msg => ~"lua leave error", player_id => PlayerId, reason => Reason}),
+            ?LOG_WARNING(#{
+                msg => ~"lua leave error",
+                player_id => PlayerId,
+                reason_class => asobi_lua_game_error:reason_class(Reason),
+                detail => asobi_lua_game_error:format_reason(Reason)
+            }),
             _ = asobi_lua_game_error:emit(leave, Reason, maps:get(script, State, ~"<unknown>")),
             {ok, State}
     end.
@@ -155,8 +165,14 @@ handle_input(PlayerId, Input, #{lua_state := LuaSt, game_state := GS} = State) -
         {ok, [GS1 | _], LuaSt2} ->
             {ok, State#{lua_state => LuaSt2, game_state => GS1}};
         {error, Reason} ->
+            %% The raw reason can embed player input via Lua error()/assert()
+            %% and is unbounded - log a classified, capped rendering so a
+            %% failing handler under input load cannot amplify into the logs.
             ?LOG_WARNING(#{
-                msg => ~"lua input error", player_id => PlayerId, reason => Reason
+                msg => ~"lua input error",
+                player_id => PlayerId,
+                reason_class => asobi_lua_game_error:reason_class(Reason),
+                detail => asobi_lua_game_error:format_reason(Reason)
             }),
             _ = asobi_lua_game_error:emit(
                 handle_input, Reason, maps:get(script, State, ~"<unknown>")
@@ -181,7 +197,11 @@ tick(State0) ->
             _ = asobi_lua_game_error:emit(tick, timeout, maps:get(script, State, ~"<unknown>")),
             {ok, State};
         {error, Reason} ->
-            ?LOG_ERROR(#{msg => ~"lua tick error", reason => Reason}),
+            ?LOG_ERROR(#{
+                msg => ~"lua tick error",
+                reason_class => asobi_lua_game_error:reason_class(Reason),
+                detail => asobi_lua_game_error:format_reason(Reason)
+            }),
             _ = asobi_lua_game_error:emit(tick, Reason, maps:get(script, State, ~"<unknown>")),
             {ok, State}
     end.
