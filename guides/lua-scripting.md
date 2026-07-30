@@ -584,9 +584,12 @@ end
   Messages are capped at 500 characters.
 - `meta` is an optional table of key/values, capped at 2 KB.
 - Logging is rate-limited (30 lines per second per match or zone, with a
-  node-wide cap). Over budget, `game.log` returns `false` and the line is
-  dropped - so a log call in a tight tick loop degrades gracefully instead
-  of flooding the log stream.
+  node-wide cap of 300). Over budget, `game.log` returns `false` and the
+  line is dropped - so a log call in a tight tick loop degrades gracefully
+  instead of flooding the log stream. Self-hosting operators can tune both
+  budgets via `{asobi_lua, rate_limits}` if log-pipeline cost matters -
+  the defaults allow up to ~2.5 KB x 300 lines per second per node at
+  the ceiling.
 
 `print` does not exist in the sandbox; it was removed because it bypassed
 the structured log stream. `game.log` is the supported way to see what your

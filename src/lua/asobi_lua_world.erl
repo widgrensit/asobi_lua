@@ -34,6 +34,9 @@ function on_zone_unloaded(cx, cy, state)     -- return state
 
 -export([init/1, join/2, join/3, leave/2, spawn_position/2]).
 -export([zone_tick/2, handle_input/3, post_tick/2]).
+-ifdef(TEST).
+-export([zone_ctx/1, make_ctx/1]).
+-endif.
 -export([generate_world/2, get_state/2]).
 -export([phases/1, on_phase_started/2, on_phase_ended/2]).
 -export([spawn_templates/1, on_world_recovered/2]).

@@ -38,7 +38,14 @@ emit(Callback, Reason, Script) ->
     end.
 
 -doc "Basename of a script path, `<<\"<unknown>\">>` for anything unexpected. Never a full path.".
--spec script_basename(term()) -> binary().
+-spec script_basename(dynamic()) -> binary().
+%% Script paths arrive as strings from game_modes config and as binaries
+%% from release env - both are real inputs, not defensive coding.
+script_basename(Script) when is_list(Script) ->
+    case unicode:characters_to_binary(Script) of
+        Bin when is_binary(Bin) -> script_basename(Bin);
+        _ -> ~"<unknown>"
+    end;
 script_basename(Script) when is_binary(Script) ->
     case last_segment(binary:split(Script, ~"/", [global])) of
         %% a trailing slash / empty input yields no segment - keep it bounded
@@ -88,14 +95,39 @@ format_term(Term) ->
 -doc "Cap a binary at the shared 500-char rendering budget; non-binaries become `<<\"<unprintable>\">>`.".
 -spec bound(term()) -> binary().
 bound(Bin) when is_binary(Bin) ->
-    case string:length(Bin) > ?MAX_MESSAGE_CHARS of
+    Safe = strip_controls(ensure_utf8(Bin)),
+    case string:length(Safe) > ?MAX_MESSAGE_CHARS of
         true ->
-            case unicode:characters_to_binary(string:slice(Bin, 0, ?MAX_MESSAGE_CHARS)) of
+            case unicode:characters_to_binary(string:slice(Safe, 0, ?MAX_MESSAGE_CHARS)) of
                 Sliced when is_binary(Sliced) -> Sliced;
                 _ -> ~"<unprintable>"
             end;
         false ->
-            Bin
+            Safe
     end;
 bound(_) ->
     ~"<unprintable>".
+
+%% Lua strings are byte arrays; a script can log bytes that are not valid
+%% UTF-8, and string:length/slice and json:encode all raise on those.
+%% Replace every invalid sequence with U+FFFD so the value is always safe
+%% to cap and encode.
+-spec ensure_utf8(binary()) -> binary().
+ensure_utf8(Bin) ->
+    case unicode:characters_to_binary(Bin, utf8, utf8) of
+        Valid when is_binary(Valid) ->
+            Valid;
+        {error, Good, Rest} ->
+            <<Good/binary, 16#EF, 16#BF, 16#BD, (ensure_utf8(drop_one(Rest)))/binary>>;
+        {incomplete, Good, _} ->
+            <<Good/binary, 16#EF, 16#BF, 16#BD>>
+    end.
+
+drop_one(<<_, Rest/binary>>) -> Rest;
+drop_one(<<>>) -> <<>>.
+
+%% C0 controls (except tab) let a script forge line-oriented log output in
+%% consumers that don't JSON-escape; strip them rather than trust every
+%% formatter downstream.
+strip_controls(Bin) ->
+    <<<<C/utf8>> || <<C/utf8>> <= Bin, C >= 16#20 orelse C =:= $\t>>.

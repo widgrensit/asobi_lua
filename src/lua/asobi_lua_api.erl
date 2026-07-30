@@ -180,7 +180,7 @@ do_log(LevelBin, Message, Meta, Ctx, St) ->
                     log_dropped(Ctx),
                     {[false], St};
                 true ->
-                    logger:log(Level, log_report(Message, Meta, Ctx)),
+                    ?LOG(Level, log_report(Message, Meta, Ctx)),
                     {[true], St}
             end
     end.

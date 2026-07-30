@@ -16,7 +16,13 @@ game_log_test_() ->
         {"per-key deny returns false and skips global", fun per_key_denied/0},
         {"global deny returns false", fun global_denied/0},
         {"missing limiters fail closed", fun no_limiter_fails_closed/0},
-        {"zone context keys on zone pid", fun zone_keyed_on_pid/0}
+        {"zone context keys on zone pid", fun zone_keyed_on_pid/0},
+        {"non-utf8 message bytes are scrubbed, not a crash", fun non_utf8_message/0},
+        {"long non-utf8 message is scrubbed and bounded", fun long_non_utf8_message/0},
+        {"control chars are stripped from messages", fun control_chars_stripped/0},
+        {"zone_ctx carries the script from game_config", fun zone_ctx_carries_script/0},
+        {"make_ctx carries the script from config", fun make_ctx_carries_script/0},
+        {"match bridge threads script into game.log", fun match_bridge_script_in_log/0}
     ]}.
 
 setup() ->
@@ -170,3 +176,73 @@ zone_keyed_on_pid() ->
     {ok, [true | _], _} = eval("return game.log('info', 'from zone')", St),
     {info, Report} = recv_report(),
     ?assertEqual(zone, maps:get(context, Report)).
+
+non_utf8_message() ->
+    attach(),
+    St = install_api(),
+    {ok, [true | _], _} = eval("return game.log('info', string.char(255, 254))", St),
+    {info, Report} = recv_report(),
+    Msg = maps:get(message, Report),
+    ?assert(is_binary(Msg)),
+    ?assertNotEqual(nomatch, binary:match(Msg, <<16#EF, 16#BF, 16#BD>>)).
+
+long_non_utf8_message() ->
+    attach(),
+    St = install_api(),
+    {ok, [true | _], _} = eval(
+        "return game.log('info', string.rep(string.char(255), 700))", St
+    ),
+    {info, Report} = recv_report(),
+    Msg = maps:get(message, Report),
+    ?assert(is_binary(Msg)),
+    ?assert(string:length(Msg) =< 500).
+
+control_chars_stripped() ->
+    attach(),
+    St = install_api(),
+    {ok, [true | _], _} = eval("return game.log('info', 'a\\nfake log line\\rb\\tc')", St),
+    {info, Report} = recv_report(),
+    ?assertEqual(~"afake log lineb\tc", maps:get(message, Report)).
+
+zone_ctx_carries_script() ->
+    Ctx = asobi_lua_world:zone_ctx(#{
+        world_server_pid => self(),
+        game_config => #{match_id => ~"w1", lua_script => ~"priv/lua/world.lua"}
+    }),
+    ?assertEqual(~"priv/lua/world.lua", maps:get(script, Ctx)),
+    ?assertEqual(self(), maps:get(zone_pid, Ctx)),
+    ?assertEqual(~"w1", maps:get(match_id, Ctx)).
+
+make_ctx_carries_script() ->
+    Ctx = asobi_lua_world:make_ctx(#{
+        match_id => ~"w2", lua_script => ~"priv/lua/world.lua"
+    }),
+    ?assertEqual(~"priv/lua/world.lua", maps:get(script, Ctx)),
+    ?assertEqual(~"w2", maps:get(match_id, Ctx)).
+
+match_bridge_script_in_log() ->
+    attach(),
+    Name = "game_log_" ++ integer_to_list(erlang:unique_integer([positive])) ++ ".lua",
+    Path = filename:join([filename:basedir(user_cache, "asobi_lua_tests"), Name]),
+    ok = filelib:ensure_dir(Path),
+    ok = file:write_file(
+        Path,
+        ~"""
+        match_size = 1
+        function init(_) return {} end
+        function join(id, s) return s end
+        function leave(id, s) return s end
+        function handle_input(pid, input, s)
+            game.log("info", "input seen")
+            return s
+        end
+        function tick(s) return s end
+        function get_state(_, s) return s end
+        """
+    ),
+    {ok, State} = asobi_lua_match:init(#{lua_script => Path, match_id => ~"m-log"}),
+    {ok, _} = asobi_lua_match:handle_input(~"p1", #{~"a" => 1}, State),
+    {info, Report} = recv_report(),
+    ?assertEqual(unicode:characters_to_binary(filename:basename(Name)), maps:get(script, Report)),
+    ?assertEqual(~"m-log", maps:get(match_id, Report)),
+    ?assertEqual(~"input seen", maps:get(message, Report)).
