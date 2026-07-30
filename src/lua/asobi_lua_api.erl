@@ -13,6 +13,10 @@ before the Lua script's `init()` runs.
 -- IDs
 game.id()                                        -- generate UUIDv7
 
+-- Logging
+game.log(level, message)                         -- structured log line ("debug"|"info"|"warning"|"error")
+game.log(level, message, meta)                   -- with a metadata table
+
 -- Messaging
 game.broadcast(event, payload)                   -- broadcast to all match players
 game.send(player_id, message)                    -- send to specific player
@@ -92,6 +96,7 @@ install(Ctx, St0) ->
     Fns = [
         %% Core
         {[~"game", ~"id"], fun_id()},
+        {[~"game", ~"log"], fun_log(Ctx)},
         {[~"game", ~"broadcast"], fun_broadcast(Ctx)},
         {[~"game", ~"send"], fun_send()},
         %% Economy
@@ -143,6 +148,122 @@ fun_id() ->
     fun(_, St) ->
         Id = asobi_id:generate(),
         {[Id], St}
+    end.
+
+%% game.log ships a structured line through the host logger, so it lands in
+%% the JSON stdout stream (and the console log viewer) instead of breaking it
+%% the way Luerl's stripped print/eprint did. Two seki gates: per-match/zone
+%% so one chatty script can't drown its neighbours' lines, plus a node-wide
+%% backstop bounding the aggregate log-pipeline cost. Levels map through
+%% explicit clauses - script data never mints atoms.
+fun_log(Ctx) ->
+    fun(Args, St) ->
+        case decode_args(Args, St) of
+            [Level, Message] when is_binary(Level) ->
+                do_log(Level, Message, undefined, Ctx, St);
+            [Level, Message, Meta] when
+                is_binary(Level) andalso (is_list(Meta) orelse is_map(Meta))
+            ->
+                do_log(Level, Message, Meta, Ctx, St);
+            _ ->
+                error_result(~"log requires (level, message[, meta_table])", St)
+        end
+    end.
+
+do_log(LevelBin, Message, Meta, Ctx, St) ->
+    case log_level(LevelBin) of
+        invalid ->
+            error_result(~"log level must be debug|info|warn|warning|error", St);
+        {ok, Level} ->
+            case log_allowed(log_key(Ctx)) of
+                false ->
+                    log_dropped(Ctx),
+                    {[false], St};
+                true ->
+                    ?LOG(Level, log_report(Message, Meta, Ctx)),
+                    {[true], St}
+            end
+    end.
+
+log_level(~"debug") -> {ok, debug};
+log_level(~"info") -> {ok, info};
+log_level(~"warn") -> {ok, warning};
+log_level(~"warning") -> {ok, warning};
+log_level(~"error") -> {ok, error};
+log_level(_) -> invalid.
+
+%% Zones share their world's match_id, so they key on the zone process
+%% instead - one zone at full budget must not starve its siblings.
+log_key(#{zone_pid := ZonePid}) when is_pid(ZonePid) -> ZonePid;
+log_key(#{match_id := MatchId}) when MatchId =/= undefined -> MatchId;
+log_key(_) -> self().
+
+%% Fails closed: embedded without the asobi_lua supervision tree (no
+%% limiters registered) means no log flooding path either.
+log_allowed(Key) ->
+    try
+        case seki:check(asobi_lua_log_limiter, Key) of
+            {allow, _} ->
+                case seki:check(asobi_lua_log_global_limiter, ~"global") of
+                    {allow, _} -> true;
+                    {deny, _} -> false
+                end;
+            {deny, _} ->
+                false
+        end
+    catch
+        _:_ -> false
+    end.
+
+log_report(Message, Meta, Ctx) ->
+    Base = #{
+        msg => ~"game.log",
+        script => asobi_lua_game_error:script_basename(maps:get(script, Ctx, undefined)),
+        context => log_context(Ctx),
+        match_id => maps:get(match_id, Ctx, undefined),
+        message => log_render(Message)
+    },
+    case Meta of
+        undefined -> Base;
+        _ -> Base#{meta => bound_meta(Meta)}
+    end.
+
+log_context(#{zone_pid := ZonePid}) when is_pid(ZonePid) -> zone;
+log_context(_) -> match.
+
+log_render(Message) when is_binary(Message) ->
+    asobi_lua_game_error:bound(Message);
+log_render(Message) ->
+    Storage = to_storage_value(Message),
+    Rendered =
+        try
+            iolist_to_binary(json:encode(Storage))
+        catch
+            _:_ -> unicode:characters_to_binary(io_lib:format("~0tp", [Storage]))
+        end,
+    asobi_lua_game_error:bound(Rendered).
+
+-define(MAX_META_BYTES, 2048).
+
+bound_meta(Meta) ->
+    Storage = to_storage_value(Meta),
+    try iolist_to_binary(json:encode(Storage)) of
+        Enc when byte_size(Enc) > ?MAX_META_BYTES -> #{~"_truncated" => true};
+        _ -> Storage
+    catch
+        _:_ -> #{~"_unencodable" => true}
+    end.
+
+%% Coarse context only - a per-match/zone tag would be unbounded telemetry
+%% cardinality. Guarded like asobi_lua_game_error:emit/3: the observer must
+%% never crash the observed game loop.
+log_dropped(Ctx) ->
+    try
+        telemetry:execute(
+            [asobi_lua, log, rate_limited], #{count => 1}, #{context => log_context(Ctx)}
+        )
+    catch
+        _:_ -> ok
     end.
 
 fun_broadcast(#{match_pid := MatchPid}) ->
@@ -810,7 +931,7 @@ to_map_acc([_ | T], Acc) ->
 %% rather than having to wrap them as `{ n = 5 }` to avoid silent data loss.
 %% Maps and nested tables recurse so e.g. `{ position = { x = 1, y = 2 } }`
 %% round-trips intact.
--spec to_storage_value(term()) -> term().
+-spec to_storage_value(term()) -> dynamic().
 to_storage_value(V) when is_number(V); is_boolean(V); is_binary(V) -> V;
 to_storage_value(nil) ->
     nil;

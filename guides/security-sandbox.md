@@ -16,9 +16,11 @@ script cannot reach them:
 - **Package machinery:** the entire `package` library, plus the default
   `require`
 - **Unstructured logging:** `print`, `eprint` — Luerl's defaults bypass
-  the structured logger and write straight to BEAM stdout. There is
-  currently no in-script logging API; surface diagnostics through game
-  state or broadcast events instead.
+  the structured logger and write straight to BEAM stdout. Use
+  `game.log(level, message[, meta])` instead: it routes a structured,
+  size-bounded line through the host logger behind a rate limit (per
+  match/zone plus a node-wide backstop), closing the two holes `print`
+  was removed for. See the Lua scripting guide's "Logging" section.
 
 `os.clock`, `os.date`, `os.difftime`, and `os.time` remain available so
 games can timestamp.

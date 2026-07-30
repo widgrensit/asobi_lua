@@ -16,11 +16,51 @@ init([]) ->
         period => 60
     },
     Children = [
+        rate_limit_spec(),
         bot_sup(),
         bot_spawner_spec(),
         config_watcher_spec()
     ],
     {ok, {SupFlags, Children}}.
+
+rate_limit_spec() ->
+    #{
+        id => asobi_lua_rate_limits,
+        start => {erlang, apply, [fun register_limiters/0, []]},
+        restart => temporary
+    }.
+
+register_limiters() ->
+    %% game.log flood control (#58): the per-match/zone budget stops one
+    %% chatty script drowning its neighbours' log lines; the constant-keyed
+    %% global backstop bounds the aggregate cost one node can push into the
+    %% operator's log pipeline regardless of how many matches are running.
+    %% Mirrors asobi_sup's limiter setup, overridable via
+    %% `{asobi_lua, rate_limits}`.
+    Defaults = #{
+        log => #{algorithm => sliding_window, limit => 30, window => 1000},
+        log_global => #{algorithm => sliding_window, limit => 300, window => 1000}
+    },
+    Configured =
+        case application:get_env(asobi_lua, rate_limits, #{}) of
+            M when is_map(M) -> M;
+            _ -> #{}
+        end,
+    maps:foreach(
+        fun(Group, DefaultOpts) ->
+            Overrides =
+                case maps:get(Group, Configured, #{}) of
+                    O when is_map(O) -> O;
+                    _ -> #{}
+                end,
+            _ = seki:new_limiter(limiter_name(Group), maps:merge(DefaultOpts, Overrides))
+        end,
+        Defaults
+    ),
+    ignore.
+
+limiter_name(log) -> asobi_lua_log_limiter;
+limiter_name(log_global) -> asobi_lua_log_global_limiter.
 
 config_watcher_spec() ->
     #{

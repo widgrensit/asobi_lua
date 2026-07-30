@@ -34,6 +34,9 @@ function on_zone_unloaded(cx, cy, state)     -- return state
 
 -export([init/1, join/2, join/3, leave/2, spawn_position/2]).
 -export([zone_tick/2, handle_input/3, post_tick/2]).
+-ifdef(TEST).
+-export([zone_ctx/1, make_ctx/1]).
+-endif.
 -export([generate_world/2, get_state/2]).
 -export([phases/1, on_phase_started/2, on_phase_ended/2]).
 -export([spawn_templates/1, on_world_recovered/2]).
@@ -754,12 +757,14 @@ zone_ctx(Config) ->
     #{
         zone_pid => self(),
         match_pid => maps:get(world_server_pid, Config, self()),
-        match_id => maps:get(match_id, GameConfig, maps:get(world_id, Config, undefined))
+        match_id => maps:get(match_id, GameConfig, maps:get(world_id, Config, undefined)),
+        script => maps:get(lua_script, GameConfig, undefined)
     }.
 
 -spec make_ctx(map()) -> map().
 make_ctx(Config) ->
     #{
         match_id => maps:get(match_id, Config, undefined),
-        match_pid => self()
+        match_pid => self(),
+        script => maps:get(lua_script, Config, undefined)
     }.
