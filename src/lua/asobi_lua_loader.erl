@@ -123,7 +123,11 @@ call(FuncPath, Args, St) ->
     BinPath = [ensure_binary(P) || P <- FuncPath],
     try
         case luerl:call_function(BinPath, Args, St) of
-            {ok, Result, St1} -> {ok, Result, St1}
+            {ok, Result, St1} -> {ok, Result, St1};
+            %% luerl:call_function returns (not raises) runtime Lua errors;
+            %% matching only {ok, ...} used to collapse them all into an
+            %% opaque {call_failed, Path} via the catch-all below.
+            {lua_error, LuaReason, _} -> {error, {lua_error, LuaReason}}
         end
     catch
         error:{lua_error, Reason, _} ->
