@@ -33,6 +33,7 @@ loader_test_() ->
         {"math.random works", fun math_random_works/0},
         {"math.random with range works", fun math_random_range/0},
         {"math.random negative range works", fun math_random_negative_range/0},
+        {"math.random single-element range", fun math_random_single_element_range/0},
         {"math.sqrt works", fun math_sqrt_works/0},
         {"math.random no args returns float", fun math_random_no_args/0},
         {"new/3 PreInstall runs before script eval", fun new3_pre_install_before_script/0},
@@ -146,6 +147,13 @@ math_random_negative_range() ->
         end,
         lists:seq(1, 50)
     ).
+
+math_random_single_element_range() ->
+    {ok, St} = asobi_lua_loader:new(fixture("test_match.lua")),
+    {ok, [Result | _], _} = asobi_lua_loader:call(
+        [<<"math">>, <<"random">>], [7, 7], St
+    ),
+    ?assertEqual(7, Result).
 
 math_sqrt_works() ->
     {ok, St} = asobi_lua_loader:new(fixture("test_match.lua")),

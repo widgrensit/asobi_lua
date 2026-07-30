@@ -1,10 +1,11 @@
 -module(asobi_lua_quirks_tests).
 -include_lib("eunit/include/eunit.hrl").
 
-%% Tests for Luerl 1.5 quirks that diverge from upstream Lua. Each
-%% test pins the current behaviour so we notice if Luerl changes it
-%% under us, and so script authors can read this file when something
-%% surprises them.
+%% Pins behaviours of asobi_lua's Lua environment worth documenting:
+%% Luerl 1.5 quirks that diverge from upstream Lua, plus deliberate
+%% override semantics. Each test pins the current behaviour so we
+%% notice if it changes under us, and so script authors can read this
+%% file when something surprises them.
 
 -spec fixture(string()) -> file:filename_all().
 fixture(Name) ->
@@ -42,6 +43,20 @@ math_random_two_args_in_range_test() ->
                 [~"math", ~"random"], [3, 6], St
             ),
             ?assert(Result >= 3 andalso Result =< 6)
+        end,
+        lists:seq(1, 50)
+    ).
+
+math_random_two_args_float_truncates_test() ->
+    %% Upstream Lua 5.3+ raises on non-integer args; the override
+    %% truncs both bounds toward zero, so (1.9, 6.2) behaves as (1, 6).
+    St = fresh_state(),
+    lists:foreach(
+        fun(_) ->
+            {ok, [Result | _], _} = asobi_lua_loader:call(
+                [~"math", ~"random"], [1.9, 6.2], St
+            ),
+            ?assert(Result >= 1 andalso Result =< 6)
         end,
         lists:seq(1, 50)
     ).

@@ -455,7 +455,8 @@ Your Lua scripts have access to:
 - **Time helpers**: `os.clock`, `os.date`, `os.difftime`, `os.time`
 - **`math.random(n)`**: integer in `[1, n]`. **`math.random(a, b)`**:
   integer in `[a, b]`; an empty interval (`a > b`) raises, as in
-  standard Lua. The RNG is auto-seeded per match, so
+  standard Lua. Non-integer bounds are truncated toward zero (standard
+  Lua raises instead). The RNG is auto-seeded per match, so
   **`math.randomseed` has no effect** — calling it is harmless, but
   scripts cannot rely on seeded determinism.
 - **`math.sqrt(n)`**: square root. Negative input returns `0.0`.
