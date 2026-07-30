@@ -1,10 +1,11 @@
 -module(asobi_lua_quirks_tests).
 -include_lib("eunit/include/eunit.hrl").
 
-%% Tests for Luerl 1.5 quirks that diverge from upstream Lua. Each
-%% test pins the current behaviour so we notice if Luerl changes it
-%% under us, and so script authors can read this file when something
-%% surprises them.
+%% Pins behaviours of asobi_lua's Lua environment worth documenting:
+%% Luerl 1.5 quirks that diverge from upstream Lua, plus deliberate
+%% override semantics. Each test pins the current behaviour so we
+%% notice if it changes under us, and so script authors can read this
+%% file when something surprises them.
 
 -spec fixture(string()) -> file:filename_all().
 fixture(Name) ->
@@ -31,15 +32,61 @@ math_random_zero_returns_float_test() ->
     ?assert(is_float(Result)),
     ?assert(Result >= 0.0 andalso Result < 1.0).
 
-math_random_two_args_unsupported_test() ->
-    %% Upstream `math.random(1, 6)` returns an integer in [1,6].
-    %% asobi_lua's override drops the second arg silently.
+math_random_two_args_in_range_test() ->
+    %% `math.random(m, n)` returns an integer in [m, n], matching
+    %% upstream Lua. The override dropped the second arg until
+    %% widgrensit/asobi_lua#104.
     St = fresh_state(),
-    {ok, [Result | _], _} = asobi_lua_loader:call(
-        [~"math", ~"random"], [1, 6], St
-    ),
-    %% With N=1 the override returns rand:uniform(1) = 1.
-    ?assertEqual(1, Result).
+    lists:foreach(
+        fun(_) ->
+            {ok, [Result | _], _} = asobi_lua_loader:call(
+                [~"math", ~"random"], [3, 6], St
+            ),
+            ?assert(Result >= 3 andalso Result =< 6)
+        end,
+        lists:seq(1, 50)
+    ).
+
+math_random_two_args_float_truncates_test() ->
+    %% Upstream Lua 5.3+ raises on non-integer args; the override
+    %% truncs both bounds toward zero, so (1.9, 6.2) behaves as (1, 6).
+    St = fresh_state(),
+    lists:foreach(
+        fun(_) ->
+            {ok, [Result | _], _} = asobi_lua_loader:call(
+                [~"math", ~"random"], [1.9, 6.2], St
+            ),
+            ?assert(Result >= 1 andalso Result =< 6)
+        end,
+        lists:seq(1, 50)
+    ).
+
+math_random_empty_interval_raises_test() ->
+    %% Upstream Lua raises "interval is empty" for math.random(2, 1).
+    %% The override raises a lua_error badarg, so pcall traps it.
+    St = fresh_state(),
+    Code = "local ok = pcall(math.random, 2, 1)\nreturn ok",
+    {ok, [Result | _], _} = luerl_do(Code, St),
+    ?assertEqual(false, Result).
+
+math_randomseed_has_no_effect_test() ->
+    %% math.randomseed seeds Luerl's internal PRNG, which the
+    %% math.random override (Erlang rand, auto-seeded) never reads.
+    %% Same seed twice must NOT produce the same sequence - scripts
+    %% cannot rely on seeded determinism.
+    St = fresh_state(),
+    Code =
+        "math.randomseed(42)\n"
+        "local a = {}\n"
+        "for i = 1, 8 do a[i] = math.random(1000000) end\n"
+        "math.randomseed(42)\n"
+        "local b = {}\n"
+        "for i = 1, 8 do b[i] = math.random(1000000) end\n"
+        "local same = true\n"
+        "for i = 1, 8 do if a[i] ~= b[i] then same = false end end\n"
+        "return same",
+    {ok, [Result | _], _} = luerl_do(Code, St),
+    ?assertEqual(false, Result).
 
 math_sqrt_negative_returns_default_test() ->
     %% Erlang's math:sqrt/1 errors on negative numbers and upstream Lua

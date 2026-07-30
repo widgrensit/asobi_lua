@@ -26,6 +26,7 @@ jobs:
       # restored from cache and fails on OTP 29 - drop it so it re-resolves.
       otp-matrix: '["29.0.2"]'
       pre-test-command: 'rm -rf _build/test/lib/meck'
+      enable-ct: true
       enable-audit: true
       enable-dependency-submission: true
       enable-summary: true

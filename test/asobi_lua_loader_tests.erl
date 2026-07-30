@@ -31,6 +31,9 @@ loader_test_() ->
         {"call with heap cap returns error on heap bomb", fun call_heap_bomb/0},
         {"max_heap_words honors application env override", fun max_heap_env_override/0},
         {"math.random works", fun math_random_works/0},
+        {"math.random with range works", fun math_random_range/0},
+        {"math.random negative range works", fun math_random_negative_range/0},
+        {"math.random single-element range", fun math_random_single_element_range/0},
         {"math.sqrt works", fun math_sqrt_works/0},
         {"math.random no args returns float", fun math_random_no_args/0},
         {"new/3 PreInstall runs before script eval", fun new3_pre_install_before_script/0},
@@ -120,6 +123,37 @@ math_random_works() ->
     ),
     ?assert(is_number(Result)),
     ?assert(Result >= 1 andalso Result =< 10).
+
+math_random_range() ->
+    {ok, St} = asobi_lua_loader:new(fixture("test_match.lua")),
+    lists:foreach(
+        fun(_) ->
+            {ok, [Result | _], _} = asobi_lua_loader:call(
+                [<<"math">>, <<"random">>], [5, 10], St
+            ),
+            ?assert(Result >= 5 andalso Result =< 10)
+        end,
+        lists:seq(1, 50)
+    ).
+
+math_random_negative_range() ->
+    {ok, St} = asobi_lua_loader:new(fixture("test_match.lua")),
+    lists:foreach(
+        fun(_) ->
+            {ok, [Result | _], _} = asobi_lua_loader:call(
+                [<<"math">>, <<"random">>], [-5, -1], St
+            ),
+            ?assert(Result >= -5 andalso Result =< -1)
+        end,
+        lists:seq(1, 50)
+    ).
+
+math_random_single_element_range() ->
+    {ok, St} = asobi_lua_loader:new(fixture("test_match.lua")),
+    {ok, [Result | _], _} = asobi_lua_loader:call(
+        [<<"math">>, <<"random">>], [7, 7], St
+    ),
+    ?assertEqual(7, Result).
 
 math_sqrt_works() ->
     {ok, St} = asobi_lua_loader:new(fixture("test_match.lua")),

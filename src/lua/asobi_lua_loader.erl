@@ -389,9 +389,24 @@ cache_and_return(Name, Module, St) ->
 install_helpers(St) ->
     RandFn = fun(Args, St0) ->
         case Args of
-            [] -> {[rand:uniform()], St0};
-            [N | _] when is_number(N), N >= 1 -> {[rand:uniform(trunc(N))], St0};
-            _ -> {[rand:uniform()], St0}
+            [] ->
+                {[rand:uniform()], St0};
+            [M, N | _] when is_number(M), is_number(N) ->
+                Lo = trunc(M),
+                Hi = trunc(N),
+                case Hi >= Lo of
+                    true ->
+                        {[Lo - 1 + rand:uniform(Hi - Lo + 1)], St0};
+                    false ->
+                        %% Upstream Lua raises "interval is empty";
+                        %% badarg_error throws a proper lua_error, so
+                        %% pcall in script code traps it.
+                        luerl_lib:badarg_error(random, Args, St0)
+                end;
+            [N | _] when is_number(N), N >= 1 ->
+                {[rand:uniform(trunc(N))], St0};
+            _ ->
+                {[rand:uniform()], St0}
         end
     end,
     SqrtFn = fun(Args, St0) ->
