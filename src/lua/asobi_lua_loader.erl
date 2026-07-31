@@ -30,6 +30,7 @@ load a specific script and pin its base directory for `require`.
 """.
 
 -export([new/1, new/2, new/3, init_sandboxed/0, call/3, call/4, do_with_timeout/3]).
+-export([is_defined/2]).
 
 -export_type([pre_install/0]).
 
@@ -114,6 +115,22 @@ init_sandboxed() ->
     %% asobi_lua_config to evaluate config manifests, which return a
     %% plain table and don't need to compose other files.
     sandboxed_state(undefined).
+
+%% Whether a top-level global names a callable in the script. Optional
+%% callbacks (spawn_templates, terrain_provider, phases, generate_world, ...)
+%% are only ever called when this is true - call/3,4 cannot itself tell
+%% "the script never defined this" apart from "the script defined it and it
+%% raised", since Luerl's undefined-global call and a runtime error both
+%% surface as the same {error, {lua_error, _}} shape.
+-spec is_defined(atom(), dynamic()) -> boolean().
+is_defined(FuncName, St) ->
+    try luerl:get_table_keys([atom_to_binary(FuncName)], St) of
+        {ok, nil, _} -> false;
+        {ok, _, _} -> true;
+        _ -> false
+    catch
+        _:_ -> false
+    end.
 
 -spec call(atom() | [atom() | binary()], [term()], dynamic()) ->
     {ok, [term()], dynamic()} | {error, term()}.
