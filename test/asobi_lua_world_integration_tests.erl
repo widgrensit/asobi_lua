@@ -25,11 +25,14 @@ ensure_pg_scope() ->
     ok.
 
 world_config() ->
+    world_config(fixture("world_server_integration.lua")).
+
+world_config(ScriptPath) ->
     N = integer_to_binary(erlang:unique_integer([positive])),
     #{
         world_id => <<"lua_world_integration_", N/binary>>,
         game_module => asobi_lua_world,
-        game_config => #{lua_script => fixture("world_server_integration.lua")},
+        game_config => #{lua_script => ScriptPath},
         grid_size => 1,
         zone_size => 1200,
         tick_rate => 20,
@@ -38,8 +41,11 @@ world_config() ->
     }.
 
 start_world() ->
+    start_world(world_config()).
+
+start_world(Config) ->
     ok = ensure_pg_scope(),
-    {ok, InstancePid} = asobi_world_instance:start_link(world_config()),
+    {ok, InstancePid} = asobi_world_instance:start_link(Config),
     unlink(InstancePid),
     %% loading -> running transition, same wait asobi_world_server_tests uses.
     timer:sleep(50),
@@ -86,6 +92,57 @@ phases_reach_the_world_server_test_() ->
             %% silently no-ops back to [] (asobi#246), this key is absent.
             ?assertMatch(#{phase := #{phase := ~"lobby"}}, Info)
         after
+            catch exit(InstancePid, shutdown)
+        end
+    end}.
+
+%% asobi#246 follow-up: fixing the silent no-op must not overcorrect into
+%% false alarms. spawn_templates/1, terrain_provider/1, and phases/1 are all
+%% documented OPTIONAL (see asobi_lua_world's moduledoc); a script that never
+%% defines terrain_provider is not an error and must not reach the dev-error
+%% telemetry channel.
+absent_optional_callback_emits_no_game_error_test_() ->
+    {timeout, 10, fun() ->
+        {ok, _} = application:ensure_all_started(telemetry),
+        Self = self(),
+        Ref = make_ref(),
+        telemetry:attach(
+            Ref, [asobi, error], fun(_E, _M, Meta, _) -> Self ! {ev, Meta} end, []
+        ),
+        %% world_server_integration.lua defines no terrain_provider.
+        InstancePid = start_world(),
+        try
+            receive
+                {ev, Meta} -> erlang:error({unexpected_game_error, Meta})
+            after 500 -> ok
+            end
+        after
+            telemetry:detach(Ref),
+            catch exit(InstancePid, shutdown)
+        end
+    end}.
+
+%% Companion positive case: a callback that IS defined and raises must still
+%% reach the dev-error channel - the is_defined/2 guard must not swallow real
+%% failures along with absent-optional-callback silence.
+defined_callback_error_emits_game_error_test_() ->
+    {timeout, 10, fun() ->
+        {ok, _} = application:ensure_all_started(telemetry),
+        Self = self(),
+        Ref = make_ref(),
+        telemetry:attach(
+            Ref, [asobi, error], fun(_E, _M, Meta, _) -> Self ! {ev, Meta} end, []
+        ),
+        Config = world_config(fixture("world_server_integration_broken_terrain.lua")),
+        InstancePid = start_world(Config),
+        try
+            receive
+                {ev, #{kind := lua_error, details := D}} ->
+                    ?assertEqual(terrain_provider, maps:get(callback, D))
+            after 2000 -> ?assert(false)
+            end
+        after
+            telemetry:detach(Ref),
             catch exit(InstancePid, shutdown)
         end
     end}.

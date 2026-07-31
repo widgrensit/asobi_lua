@@ -257,12 +257,21 @@ post_tick(TickN, State0) ->
 
 -spec generate_world(integer(), map()) -> {ok, map()}.
 generate_world(Seed, #{lua_state := LuaSt} = State) ->
-    case asobi_lua_loader:call(generate_world, [Seed, #{}], LuaSt, ?GENERATE_TIMEOUT) of
-        {ok, [ZoneStates | _], LuaSt1} ->
-            {ok, decode_zone_states(ZoneStates, LuaSt1)};
-        {error, Reason} ->
-            log_lua_error(generate_world, Reason, State),
-            {ok, #{}}
+    %% generate_world is optional (see moduledoc) - asobi_lua_loader:call/4
+    %% cannot tell "never defined" apart from "defined and raised", both
+    %% surface as {error, {lua_error, _}} - so probe first. Only a script
+    %% that DOES define it and then fails gets logged.
+    case asobi_lua_loader:is_defined(generate_world, LuaSt) of
+        false ->
+            {ok, #{}};
+        true ->
+            case asobi_lua_loader:call(generate_world, [Seed, #{}], LuaSt, ?GENERATE_TIMEOUT) of
+                {ok, [ZoneStates | _], LuaSt1} ->
+                    {ok, decode_zone_states(ZoneStates, LuaSt1)};
+                {error, Reason} ->
+                    log_lua_error(generate_world, Reason, State),
+                    {ok, #{}}
+            end
     end;
 generate_world(Seed, Config) when is_map(Config) ->
     %% Called by asobi_world_server before init/1 has run, so no lua_state is
@@ -272,7 +281,7 @@ generate_world(Seed, Config) when is_map(Config) ->
     %% the script for zone coords + initial per-zone state - each zone builds
     %% its own VM later, in its own process, via init_zone_state/2.
     %%
-    %% match_pid in the ctx is the caller of generate_world/2 — typically
+    %% match_pid in the ctx is the caller of generate_world/2 - typically
     %% asobi_world_server, not a match process. game.broadcast emitted from a
     %% script's generate_world callback therefore reaches the world server,
     %% mirroring how broadcast already routed pre-fix.
@@ -294,12 +303,18 @@ get_state(PlayerId, #{lua_state := LuaSt, game_state := GS}) ->
 
 -spec phases(map()) -> [map()].
 phases(#{lua_state := LuaSt} = State) ->
-    case asobi_lua_loader:call(phases, [#{}], LuaSt, ?INIT_TIMEOUT) of
-        {ok, [PhasesRef | _], LuaSt1} ->
-            decode_phases(PhasesRef, LuaSt1);
-        {error, Reason} ->
-            log_lua_error(phases, Reason, State),
-            []
+    %% Optional callback - see generate_world/2's is_defined comment above.
+    case asobi_lua_loader:is_defined(phases, LuaSt) of
+        false ->
+            [];
+        true ->
+            case asobi_lua_loader:call(phases, [#{}], LuaSt, ?INIT_TIMEOUT) of
+                {ok, [PhasesRef | _], LuaSt1} ->
+                    decode_phases(PhasesRef, LuaSt1);
+                {error, Reason} ->
+                    log_lua_error(phases, Reason, State),
+                    []
+            end
     end;
 phases(Config) when is_map(Config) ->
     %% Called by asobi_world_server:init/1 with GameConfig directly - the same
@@ -336,12 +351,18 @@ on_phase_ended(PhaseName, #{lua_state := LuaSt, game_state := GS} = State) ->
 
 -spec spawn_templates(map()) -> #{binary() => asobi_zone_spawner:spawn_template()}.
 spawn_templates(#{lua_state := LuaSt} = State) ->
-    case asobi_lua_loader:call(spawn_templates, [#{}], LuaSt, ?INIT_TIMEOUT) of
-        {ok, [TemplatesRef | _], LuaSt1} ->
-            decode_spawn_templates(TemplatesRef, LuaSt1);
-        {error, Reason} ->
-            log_lua_error(spawn_templates, Reason, State),
-            #{}
+    %% Optional callback - see generate_world/2's is_defined comment above.
+    case asobi_lua_loader:is_defined(spawn_templates, LuaSt) of
+        false ->
+            #{};
+        true ->
+            case asobi_lua_loader:call(spawn_templates, [#{}], LuaSt, ?INIT_TIMEOUT) of
+                {ok, [TemplatesRef | _], LuaSt1} ->
+                    decode_spawn_templates(TemplatesRef, LuaSt1);
+                {error, Reason} ->
+                    log_lua_error(spawn_templates, Reason, State),
+                    #{}
+            end
     end;
 spawn_templates(Config) when is_map(Config) ->
     %% Called by asobi_world_server:configure_zone_manager/1 with the raw
@@ -371,12 +392,18 @@ on_world_recovered(Snapshots, #{lua_state := LuaSt, game_state := GS} = State) -
 
 -spec terrain_provider(map()) -> {module(), map()} | none.
 terrain_provider(#{lua_state := LuaSt} = State) ->
-    case asobi_lua_loader:call(terrain_provider, [#{}], LuaSt, ?INIT_TIMEOUT) of
-        {ok, [Result | _], LuaSt1} ->
-            decode_terrain_provider(Result, LuaSt1);
-        {error, Reason} ->
-            log_lua_error(terrain_provider, Reason, State),
-            none
+    %% Optional callback - see generate_world/2's is_defined comment above.
+    case asobi_lua_loader:is_defined(terrain_provider, LuaSt) of
+        false ->
+            none;
+        true ->
+            case asobi_lua_loader:call(terrain_provider, [#{}], LuaSt, ?INIT_TIMEOUT) of
+                {ok, [Result | _], LuaSt1} ->
+                    decode_terrain_provider(Result, LuaSt1);
+                {error, Reason} ->
+                    log_lua_error(terrain_provider, Reason, State),
+                    none
+            end
     end;
 terrain_provider(Config) when is_map(Config) ->
     %% Same raw-config gap as spawn_templates/1 above.

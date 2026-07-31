@@ -37,7 +37,11 @@ loader_test_() ->
         {"math.sqrt works", fun math_sqrt_works/0},
         {"math.random no args returns float", fun math_random_no_args/0},
         {"new/3 PreInstall runs before script eval", fun new3_pre_install_before_script/0},
-        {"new/2 backwards-compat (no PreInstall)", fun new2_no_pre_install/0}
+        {"new/2 backwards-compat (no PreInstall)", fun new2_no_pre_install/0},
+        {"is_defined true for a real global function", fun is_defined_true_for_real_function/0},
+        {"is_defined false for an absent global", fun is_defined_false_for_absent_global/0},
+        {"is_defined true for a non-function global (checks nil, not callability)",
+            fun is_defined_true_for_non_function_global/0}
     ].
 
 loads_valid_script() ->
@@ -194,6 +198,23 @@ new2_no_pre_install() ->
     {ok, St} = asobi_lua_loader:new(fixture("pre_install_probe.lua"), 2000),
     {ok, [Value | _], _} = asobi_lua_loader:call(probe, [], St),
     ?assertEqual(nil, Value).
+
+is_defined_true_for_real_function() ->
+    {ok, St} = asobi_lua_loader:new(fixture("test_match.lua")),
+    ?assert(asobi_lua_loader:is_defined(init, St)).
+
+is_defined_false_for_absent_global() ->
+    {ok, St} = asobi_lua_loader:new(fixture("test_match.lua")),
+    ?assertNot(asobi_lua_loader:is_defined(nonexistent_function, St)).
+
+is_defined_true_for_non_function_global() ->
+    %% is_defined/2 only checks "does this global exist" (nil vs not),
+    %% not "is it callable" - a script-level constant global is `nil` if
+    %% and only if the script never set it. spawn_world.lua sets
+    %% `match_size` as a plain number, which still reads as "defined".
+    {ok, St} = asobi_lua_loader:new(fixture("spawn_world.lua")),
+    ?assert(asobi_lua_loader:is_defined(match_size, St)),
+    ?assertNot(asobi_lua_loader:is_defined(some_field_never_set, St)).
 
 %% --- Helpers ---
 
