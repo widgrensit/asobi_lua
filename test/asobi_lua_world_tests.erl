@@ -280,6 +280,118 @@ spawn_templates_decodes_test() ->
         file:delete(Path)
     end.
 
+%% --- Raw-config regression tests (asobi#246) ---
+%%
+%% asobi_world_server calls spawn_templates/1 and terrain_provider/1 with the
+%% RAW world config it holds (game_config nested inside, no lua_state - it
+%% hasn't called GameMod:init/1 for this purpose), and calls phases/1 with the
+%% game_config map directly, for the same reason. Every test above builds its
+%% state via asobi_lua_world:init/1 first, which means every one of them
+%% passed a #{lua_state := _} map - the ONE shape that was already correct.
+%% None of them would have caught a callback silently no-op'ing on the real
+%% shape asobi_world_server actually sends. These call the callbacks the way
+%% asobi_world_server really does.
+
+spawn_templates_from_raw_config_test() ->
+    Path = world_temp_script(
+        ~"""
+        match_size = 1
+        max_players = 1
+        game_type = "world"
+        function init(_) return {} end
+        function spawn_position(_, _) return { x = 0, y = 0 } end
+        function generate_world(_, _) return { ['0,0'] = {} } end
+        function zone_tick(e, z) return e, z end
+        function handle_input(_, _, e) return e end
+        function post_tick(_, s) return s end
+        function spawn_templates(_)
+            return { goblin = { type = 'npc', persistent = true, base_state = { hp = 10 } } }
+        end
+        """
+    ),
+    try
+        %% Mirrors asobi_world_server's own State#{config => Config} - the
+        %% exact map get_spawn_templates/2 passes to GameMod:spawn_templates/1.
+        RawConfig = #{
+            world_id => ~"raw_probe",
+            game_module => asobi_lua_world,
+            game_config => #{lua_script => Path}
+        },
+        Templates = asobi_lua_world:spawn_templates(RawConfig),
+        ?assertMatch(#{~"goblin" := _}, Templates),
+        Goblin = maps:get(~"goblin", Templates),
+        ?assertEqual(~"npc", maps:get(type, Goblin))
+    after
+        file:delete(Path)
+    end.
+
+spawn_templates_from_raw_config_missing_script_returns_empty_test() ->
+    ?assertEqual(#{}, asobi_lua_world:spawn_templates(#{world_id => ~"raw_probe"})).
+
+terrain_provider_from_raw_config_test() ->
+    Path = world_temp_script(
+        ~"""
+        match_size = 1
+        max_players = 1
+        game_type = "world"
+        function init(_) return {} end
+        function spawn_position(_, _) return { x = 0, y = 0 } end
+        function generate_world(_, _) return { ['0,0'] = {} } end
+        function zone_tick(e, z) return e, z end
+        function handle_input(_, _, e) return e end
+        function post_tick(_, s) return s end
+        function terrain_provider(_)
+            return { module = 'erlang', args = { foo = 'bar' } }
+        end
+        """
+    ),
+    Old = application:get_env(asobi_lua, terrain_providers),
+    application:set_env(asobi_lua, terrain_providers, [erlang]),
+    try
+        %% Mirrors asobi_world_server:start_terrain_store/2's GameMod:terrain_provider(Config).
+        RawConfig = #{
+            world_id => ~"raw_probe",
+            game_module => asobi_lua_world,
+            game_config => #{lua_script => Path}
+        },
+        ?assertMatch({erlang, #{}}, asobi_lua_world:terrain_provider(RawConfig))
+    after
+        case Old of
+            {ok, V} -> application:set_env(asobi_lua, terrain_providers, V);
+            undefined -> application:unset_env(asobi_lua, terrain_providers)
+        end,
+        file:delete(Path)
+    end.
+
+phases_from_raw_config_test() ->
+    Path = world_temp_script(
+        ~"""
+        match_size = 1
+        max_players = 1
+        game_type = "world"
+        function init(_) return {} end
+        function spawn_position(_, _) return { x = 0, y = 0 } end
+        function generate_world(_, _) return { ['0,0'] = {} } end
+        function zone_tick(e, z) return e, z end
+        function handle_input(_, _, e) return e end
+        function post_tick(_, s) return s end
+        function phases(_)
+            return { { name = 'lobby', duration = 5000 } }
+        end
+        """
+    ),
+    try
+        %% Mirrors asobi_world_server:init/1's GameMod:phases(GameConfig) -
+        %% GameConfig has lua_script at its top level, no nested game_config.
+        GameConfig = #{lua_script => Path, match_id => ~"raw_probe"},
+        Phases = asobi_lua_world:phases(GameConfig),
+        ?assertEqual(1, length(Phases)),
+        [Lobby] = Phases,
+        ?assertEqual(~"lobby", maps:get(name, Lobby))
+    after
+        file:delete(Path)
+    end.
+
 on_phase_started_threads_state_test() ->
     Path = world_temp_script(
         ~"""

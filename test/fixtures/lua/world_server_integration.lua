@@ -1,7 +1,6 @@
--- World fixture exercising spawn_templates + game.zone.spawn end-to-end.
--- zone_tick seeds the zone once on the first tick; the spawn cast is handled
--- by the live asobi_zone process, so the entity appears in the zone's entity
--- map a tick later.
+-- asobi#246 regression fixture: exercises spawn_templates, terrain_provider,
+-- and phases exactly as asobi_world_server calls them in production - through
+-- a real asobi_world_instance boot, not a hand-built #{lua_state := _} map.
 match_size = 1
 max_players = 8
 game_type = "world"
@@ -11,15 +10,16 @@ view_radius = 0
 
 function spawn_templates(config)
     return {
-        goblin = {
-            type = "npc",
-            base_state = { health = 100, ai = "patrol" },
-            respawn = { delay = 5000, jitter = 1000 },
-        },
-        chest = {
+        probe = {
             type = "object",
-            base_state = { loot = "common" },
+            base_state = { solid = true },
         },
+    }
+end
+
+function phases(config)
+    return {
+        { name = "lobby", duration = 5000 },
     }
 end
 
@@ -41,11 +41,7 @@ function leave(player_id, state) return state end
 function zone_tick(entities, zone_state)
     zone_state = zone_state or {}
     if not zone_state.seeded then
-        game.zone.spawn("goblin", 500, 500)
-        game.zone.spawn("chest", 620, 600, { loot = "rare" })
-        -- asobi#246: an empty overrides table must be accepted like the
-        -- 3-arg form, not rejected (it decodes to [] via deep_decode, not #{}).
-        game.zone.spawn("chest", 640, 600, {})
+        game.zone.spawn("probe", 500, 500)
         zone_state.seeded = true
     end
     return entities, zone_state

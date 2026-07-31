@@ -106,14 +106,16 @@ lua_spawn_reaches_zone() ->
     Goblins = by_type(~"npc", Entities),
     Chests = by_type(~"object", Entities),
     ?assertEqual(1, length(Goblins)),
-    ?assertEqual(1, length(Chests)),
+    %% One 4-arg spawn with populated overrides ({loot="rare"}), one with an
+    %% empty overrides table ({}) - asobi#246 rejected the latter outright.
+    ?assertEqual(2, length(Chests)),
 
     [Goblin] = Goblins,
     ?assert(maps:get(~"health", Goblin) == 100),
     ?assertEqual(~"patrol", maps:get(~"ai", Goblin)),
 
-    [Chest] = Chests,
-    ?assertEqual(~"rare", maps:get(~"loot", Chest)),
+    ChestLoot = lists:sort([maps:get(~"loot", C) || C <- Chests]),
+    ?assertEqual([~"common", ~"rare"], ChestLoot),
 
     gen_server:stop(ZonePid),
     erlang:erase({asobi_lua_world, zone_state}).

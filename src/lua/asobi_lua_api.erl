@@ -670,11 +670,24 @@ fun_zone_spawn(#{zone_pid := ZonePid}) ->
             [TemplateId, X, Y] when is_binary(TemplateId), is_number(X), is_number(Y) ->
                 asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}),
                 {[true], St};
-            [TemplateId, X, Y, Overrides] when
-                is_binary(TemplateId), is_number(X), is_number(Y), is_map(Overrides)
+            [TemplateId, X, Y, Overrides0] when
+                is_binary(TemplateId), is_number(X), is_number(Y)
             ->
-                asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}, Overrides),
-                {[true], St};
+                %% An empty Lua table `{}` decodes (via deep_decode/1) to `[]`,
+                %% not `#{}` - there are no pairs to infer a map from. A
+                %% populated, string-keyed table already decodes to a map.
+                case Overrides0 of
+                    Overrides when is_map(Overrides) ->
+                        asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}, Overrides),
+                        {[true], St};
+                    [] ->
+                        asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}, #{}),
+                        {[true], St};
+                    _ ->
+                        error_result(
+                            ~"zone.spawn requires (template_id, x, y[, overrides])", St
+                        )
+                end;
             _ ->
                 error_result(~"zone.spawn requires (template_id, x, y[, overrides])", St)
         end

@@ -314,6 +314,16 @@ phases(#{lua_state := LuaSt} = _Config) ->
         {error, _} ->
             []
     end;
+phases(Config) when is_map(Config) ->
+    %% Called by asobi_world_server:init/1 with GameConfig directly - the same
+    %% map GameMod:init/1 itself receives - so lua_script lives at this map's
+    %% top level (no game_config unwrap needed, unlike spawn_templates/1 and
+    %% terrain_provider/1 below).
+    ScriptPath = maps:get(lua_script, Config, undefined),
+    case boot_throwaway_lua_state(ScriptPath, Config, phases, ?INIT_TIMEOUT) of
+        {ok, LuaSt} -> phases(#{lua_state => LuaSt});
+        {error, _} -> []
+    end;
 phases(_) ->
     [].
 
@@ -345,6 +355,17 @@ spawn_templates(#{lua_state := LuaSt} = _Config) ->
         {error, _} ->
             #{}
     end;
+spawn_templates(Config) when is_map(Config) ->
+    %% Called by asobi_world_server:configure_zone_manager/1 with the raw
+    %% world config (game_config nested inside) - no lua_state threaded
+    %% through, since GameMod:init/1 already ran but its result was never
+    %% passed here. Same gap as generate_world/2's raw-config clause.
+    GameConfig = maps:get(game_config, Config, #{}),
+    ScriptPath = maps:get(lua_script, GameConfig, undefined),
+    case boot_throwaway_lua_state(ScriptPath, Config, spawn_templates, ?INIT_TIMEOUT) of
+        {ok, LuaSt} -> spawn_templates(#{lua_state => LuaSt});
+        {error, _} -> #{}
+    end;
 spawn_templates(_) ->
     #{}.
 
@@ -369,6 +390,14 @@ terrain_provider(#{lua_state := LuaSt} = _Config) ->
             decode_terrain_provider(Result, LuaSt1);
         {error, _} ->
             none
+    end;
+terrain_provider(Config) when is_map(Config) ->
+    %% Same raw-config gap as spawn_templates/1 above.
+    GameConfig = maps:get(game_config, Config, #{}),
+    ScriptPath = maps:get(lua_script, GameConfig, undefined),
+    case boot_throwaway_lua_state(ScriptPath, Config, terrain_provider, ?INIT_TIMEOUT) of
+        {ok, LuaSt} -> terrain_provider(#{lua_state => LuaSt});
+        {error, _} -> none
     end;
 terrain_provider(_) ->
     none.
@@ -768,3 +797,27 @@ make_ctx(Config) ->
         match_pid => self(),
         script => maps:get(lua_script, Config, undefined)
     }.
+
+%% Init-time callbacks (spawn_templates/1, terrain_provider/1, phases/1) are
+%% invoked by asobi_world_server with the raw world config - no lua_state
+%% threaded through, since GameMod:init/1 hasn't run yet (mirrors
+%% generate_world/2's raw-config clause). Boot a throwaway luerl state just to
+%% ask the script the one question, then let it get GC'd.
+-spec boot_throwaway_lua_state(binary() | undefined, map(), atom(), non_neg_integer()) ->
+    {ok, dynamic()} | {error, term()}.
+boot_throwaway_lua_state(undefined, _Config, _Caller, _Timeout) ->
+    {error, missing_lua_script};
+boot_throwaway_lua_state(ScriptPath, Config, Caller, Timeout) ->
+    PreInstall = fun(St) -> asobi_lua_api:install(make_ctx(Config), St) end,
+    case asobi_lua_loader:new(ScriptPath, Timeout, PreInstall) of
+        {ok, LuaSt} ->
+            {ok, LuaSt};
+        {error, Reason} ->
+            ?LOG_ERROR(#{
+                msg => ~"asobi_lua_world: lua_loader:new failed for a raw-config callback",
+                callback => Caller,
+                script => ScriptPath,
+                reason => Reason
+            }),
+            {error, Reason}
+    end.
