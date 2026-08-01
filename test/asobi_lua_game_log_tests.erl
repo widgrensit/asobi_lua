@@ -205,13 +205,24 @@ control_chars_stripped() ->
     ?assertEqual(~"afake log lineb\tc", maps:get(message, Report)).
 
 zone_ctx_carries_script() ->
-    Ctx = asobi_lua_world:zone_ctx(#{
-        world_server_pid => self(),
-        game_config => #{match_id => ~"w1", lua_script => ~"priv/lua/world.lua"}
-    }),
+    Tab = ets:new(test_templates, [set, protected]),
+    ets:insert(Tab, {known, #{~"goblin" => #{type => ~"npc", base_state => #{}}}}),
+    Ctx = asobi_lua_world:zone_ctx(
+        #{
+            world_server_pid => self(),
+            game_config => #{match_id => ~"w1", lua_script => ~"priv/lua/world.lua"}
+        },
+        Tab
+    ),
     ?assertEqual(~"priv/lua/world.lua", maps:get(script, Ctx)),
     ?assertEqual(self(), maps:get(zone_pid, Ctx)),
-    ?assertEqual(~"w1", maps:get(match_id, Ctx)).
+    ?assertEqual(~"w1", maps:get(match_id, Ctx)),
+    %% asobi_lua#110 + asobi#253: zone_ctx/2 carries a table REFERENCE, not
+    %% a known_templates map snapshot - known_template/2 reads the live row
+    %% from this table at call time, so it survives any number of hot
+    %% reloads.
+    ?assertEqual(Tab, maps:get(templates_tab, Ctx)),
+    ?assertNot(maps:is_key(known_templates, Ctx)).
 
 make_ctx_carries_script() ->
     Ctx = asobi_lua_world:make_ctx(#{

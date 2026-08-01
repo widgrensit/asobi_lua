@@ -29,7 +29,9 @@ function on_zone_unloaded(cx, cy, state)     -- return state
 
 asobi#253: after a hot reload (`ASOBI_LUA_RELOAD`/`reload_mode`), `spawn_templates_hint/1`
 tells the running zone to re-fetch `spawn_templates(config)` so an edited script's new
-templates become spawnable without restarting the zone.
+templates become spawnable without restarting the zone. asobi_lua#110's `game.zone.spawn`
+guard reads that live set from a per-zone ETS table rather than a value snapshotted once
+into Ctx, so this stays correct across any number of hot reloads.
 """.
 
 -behaviour(asobi_world).
@@ -39,7 +41,7 @@ templates become spawnable without restarting the zone.
 -export([init/1, join/2, join/3, leave/2, spawn_position/2]).
 -export([zone_tick/2, handle_input/3, post_tick/2]).
 -ifdef(TEST).
--export([zone_ctx/1, make_ctx/1]).
+-export([zone_ctx/2, make_ctx/1]).
 -endif.
 -export([generate_world/2, get_state/2]).
 -export([phases/1, on_phase_started/2, on_phase_ended/2]).
@@ -160,6 +162,34 @@ spawn_position(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
 %% proc dict is safe and per-zone-isolated.
 -define(PD_KEY, {?MODULE, zone_state}).
 
+%% asobi_lua#110 + asobi#253: the zone's declared spawn-template set, read
+%% live by asobi_lua_api:known_template/2 on every game.zone.spawn call
+%% instead of being snapshotted once into Ctx. A Ctx-cached map (the
+%% original #110 fix) goes stale forever after the first hot reload: the
+%% zone's own game_module callback re-runs (via spawn_templates_hint/1
+%% below, wired from asobi_zone's maybe_apply_spawn_templates_hint/5 on
+%% every reload tick) and updates asobi_zone_spawner's live set, but
+%% asobi_lua_reload:reload_script/2 re-executes the edited script's body
+%% into the EXISTING Luerl state and never re-runs asobi_lua_api:install/2
+%% - so a Ctx-captured closure keeps whatever map it saw at zone init for
+%% the zone's whole lifetime.
+%%
+%% A process dictionary keyed by `self()` (as used for ?PD_KEY above) does
+%% NOT fix this: every Lua callback invoked with a wall-clock budget
+%% (asobi_lua_loader:call/4, which is everything except handle_input/3 -
+%% see ADR 0002) runs the actual Lua call inside a short-lived worker
+%% process spawned by asobi_lua_loader:bounded_eval/2, not the zone
+%% process itself. `game.zone.spawn` is called from `zone_tick`, so its
+%% closure's `self()` at call time is that ephemeral worker, not the zone
+%% - a pd read there is always empty. Instead, `init_zone_state/2` gives
+%% each zone its own small `protected` ETS table (owned by the zone
+%% process, so it dies with it - no leak) and stores its reference in both
+%% Ctx (`templates_tab`, for the closure to read) and ZoneState
+%% (`templates_tab`, for spawn_templates_hint/1 to update). Only the owning
+%% (zone) process ever writes to it; any process can read it, which is
+%% exactly the write/read split here.
+-define(TEMPLATES_KEY, known).
+
 -spec zone_tick(map(), term()) -> {map(), term()}.
 zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
     %% Pick up any lua_state updates that handle_input stashed earlier this
@@ -180,6 +210,16 @@ zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
     %% Mirrors asobi_lua_match's per-tick reload — keeps live worlds in sync
     %% with on-disk edits without restarting the zone process.
     ZoneState = asobi_lua_reload:maybe_hot_reload(ZoneState1),
+    %% asobi#253: refresh the live known-template set (?TEMPLATES_KEY) the
+    %% instant a reload lands, before this tick's own zone_tick Lua body
+    %% runs - not just from asobi_zone's separate, later
+    %% spawn_templates_hint/1 call (maybe_apply_spawn_templates_hint/5 runs
+    %% AFTER GameMod:zone_tick/2 returns). Without this, a script that
+    %% spawns its own newly-declared template on the very tick it gets
+    %% hot-reloaded would still see the stale set for that one tick.
+    %% spawn_templates_hint/1 is cheap when nothing changed and idempotent
+    %% when asobi_zone calls it again right after for the spawner update.
+    _ = spawn_templates_hint(ZoneState),
     %% Entities returned here (and from handle_input/3 below) feed straight
     %% into asobi_zone's shared, game-module-agnostic tick path - crossing
     %% detection, snapshotting, grid maintenance - all of which pattern-match
@@ -415,7 +455,14 @@ spawn_templates_hint(#{just_reloaded := true, lua_state := LuaSt} = State) ->
         true ->
             case asobi_lua_loader:call(spawn_templates, [#{}], LuaSt, ?INIT_TIMEOUT) of
                 {ok, [TemplatesRef | _], LuaSt1} ->
-                    {changed, decode_spawn_templates(TemplatesRef, LuaSt1)};
+                    New = decode_spawn_templates(TemplatesRef, LuaSt1),
+                    %% Refresh the live set the zone's own Luerl closures read
+                    %% at call time - see ?TEMPLATES_KEY above. Without this,
+                    %% asobi_zone_spawner learns about the reloaded template
+                    %% (via the {changed, New} return below) but
+                    %% game.zone.spawn keeps rejecting it forever.
+                    put_known_templates(State, New),
+                    {changed, New};
                 {error, Reason} ->
                     log_lua_error(spawn_templates_hint, Reason, State),
                     unchanged
@@ -423,6 +470,11 @@ spawn_templates_hint(#{just_reloaded := true, lua_state := LuaSt} = State) ->
     end;
 spawn_templates_hint(_State) ->
     unchanged.
+
+put_known_templates(#{templates_tab := Tab}, Templates) when is_map(Templates) ->
+    ets:insert(Tab, {?TEMPLATES_KEY, Templates});
+put_known_templates(_State, _Templates) ->
+    ok.
 
 %% --- World recovery ---
 
@@ -807,7 +859,25 @@ init_zone_state(Config, ZoneState00) ->
         undefined ->
             ZoneState0;
         ScriptPath ->
-            PreInstall = fun(St) -> asobi_lua_api:install(zone_ctx(Config), St) end,
+            %% asobi_lua#110: ask the script for its declared template set up
+            %% front (a throwaway VM, same mechanism as spawn_templates/1's
+            %% raw-config clause) and stash it in a fresh, per-zone ETS table
+            %% before the per-zone VM's game.zone.spawn is ever callable.
+            %% game.zone.spawn checks membership against that live table
+            %% synchronously, instead of round-tripping the self-cast to
+            %% asobi_zone (which would deadlock - the zone's Luerl VM runs
+            %% inside the zone process itself). Unlike a Ctx-cached snapshot,
+            %% this stays current: a later hot reload overwrites the same
+            %% table's row from spawn_templates_hint/1 above. `protected`
+            %% (the default) is deliberate: only this (owning, zone) process
+            %% ever writes; asobi_lua_api:known_template/2 reads it from
+            %% whichever process is actually running the Lua closure at the
+            %% time (see ?TEMPLATES_KEY's comment - not necessarily this
+            %% one). The table dies with the zone process, so it never leaks.
+            Templates = spawn_templates(Config),
+            TemplatesTab = ets:new(asobi_lua_zone_templates, [set, protected]),
+            ets:insert(TemplatesTab, {?TEMPLATES_KEY, Templates}),
+            PreInstall = fun(St) -> asobi_lua_api:install(zone_ctx(Config, TemplatesTab), St) end,
             case asobi_lua_loader:new(ScriptPath, ?GENERATE_TIMEOUT, PreInstall) of
                 {ok, LuaSt0} ->
                     {GameState, LuaSt1} = restore_game_state(ZoneState0, LuaSt0),
@@ -815,7 +885,8 @@ init_zone_state(Config, ZoneState00) ->
                         lua_state => LuaSt1,
                         game_state => GameState,
                         script => ScriptPath,
-                        script_mtime => filelib:last_modified(ScriptPath)
+                        script_mtime => filelib:last_modified(ScriptPath),
+                        templates_tab => TemplatesTab
                     };
                 {error, Reason} ->
                     ?LOG_ERROR(#{
@@ -852,14 +923,19 @@ restore_game_state(ZoneState0, LuaSt) ->
         _ -> {nil, LuaSt}
     end.
 
--spec zone_ctx(map()) -> map().
-zone_ctx(Config) ->
+-spec zone_ctx(map(), ets:table()) -> map().
+zone_ctx(Config, TemplatesTab) ->
     GameConfig = maps:get(game_config, Config, #{}),
     #{
         zone_pid => self(),
         match_pid => maps:get(world_server_pid, Config, self()),
         match_id => maps:get(match_id, GameConfig, maps:get(world_id, Config, undefined)),
-        script => maps:get(lua_script, GameConfig, undefined)
+        script => maps:get(lua_script, GameConfig, undefined),
+        %% asobi_lua#110 + asobi#253: NOT a known_templates snapshot here -
+        %% a table reference, not the map value. asobi_lua_api:known_template/2
+        %% reads the live row from this table at call time, so it survives
+        %% any number of hot reloads. See ?TEMPLATES_KEY's comment above.
+        templates_tab => TemplatesTab
     }.
 
 %% Config is either the game_config directly (init/1, phases/1 - lua_script

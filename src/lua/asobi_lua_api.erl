@@ -57,8 +57,8 @@ game.spatial.in_range(entity_a, entity_b, range)
 game.spatial.distance(entity_a, entity_b)
 
 -- Zone spawning (world mode only, requires zone_pid in context)
-game.zone.spawn(template_id, x, y)
-game.zone.spawn(template_id, x, y, overrides)
+game.zone.spawn(template_id, x, y)              -- false if template_id is unknown
+game.zone.spawn(template_id, x, y, overrides)   -- false if template_id is unknown
 game.zone.despawn(entity_id)
 
 -- Terrain (world mode only, requires terrain_store_pid in context)
@@ -715,29 +715,62 @@ decode_spatial_opts(_) ->
 
 %% --- Zone spawning ---
 
-fun_zone_spawn(#{zone_pid := ZonePid}) ->
+%% asobi_lua#110: asobi_zone:spawn_entity/3-4 is a self-cast - the zone's own
+%% Luerl VM runs inside the zone process (zone_pid =:= self(), see
+%% asobi_lua_world:zone_ctx/2), so making the call synchronous to learn
+%% whether the template_id resolved would deadlock the zone. Instead the
+%% zone's declared template set is checked here, before the cast, so a
+%% typo'd template_id returns `false` synchronously instead of a `true` that
+%% just means "the cast was sent", not "something spawned".
+%%
+%% asobi#253: that template set is read live via known_template/2, NOT
+%% cached in Ctx - a Ctx snapshot taken at zone init goes stale forever
+%% after a script hot-reload adds/renames a template (asobi_lua_reload
+%% re-executes the edited script into the existing Luerl state without
+%% ever re-running install/2, so a Ctx-captured closure never sees the
+%% update). See asobi_lua_world's ?TEMPLATES_KEY.
+%%
+%% Note this closure (and known_template/2 below) does NOT run in the zone
+%% process: asobi_lua_loader:call/4 (used for every Lua callback with a
+%% wall-clock budget, i.e. everything but handle_input/3) spawns a
+%% short-lived worker to run the actual Lua call, so `self()` here is that
+%% worker, not `ZonePid`. That is exactly why the live template set lives
+%% in a `protected` ETS table keyed by reference (readable from any
+%% process), not the process dictionary of whichever process happens to be
+%% running this callback.
+fun_zone_spawn(#{zone_pid := ZonePid} = Ctx) ->
     fun(Args, St) ->
         case decode_args(Args, St) of
             [TemplateId, X, Y] when is_binary(TemplateId), is_number(X), is_number(Y) ->
-                asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}),
-                {[true], St};
+                case known_template(TemplateId, Ctx) of
+                    true ->
+                        asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}),
+                        {[true], St};
+                    false ->
+                        {[false], St}
+                end;
             [TemplateId, X, Y, Overrides0] when
                 is_binary(TemplateId), is_number(X), is_number(Y)
             ->
-                %% An empty Lua table `{}` decodes (via deep_decode/1) to `[]`,
-                %% not `#{}` - there are no pairs to infer a map from. A
-                %% populated, string-keyed table already decodes to a map.
-                case Overrides0 of
-                    Overrides when is_map(Overrides) ->
-                        asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}, Overrides),
-                        {[true], St};
-                    [] ->
-                        asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}, #{}),
-                        {[true], St};
-                    _ ->
-                        error_result(
-                            ~"zone.spawn requires (template_id, x, y[, overrides])", St
-                        )
+                case known_template(TemplateId, Ctx) of
+                    true ->
+                        %% An empty Lua table `{}` decodes (via deep_decode/1) to `[]`,
+                        %% not `#{}` - there are no pairs to infer a map from. A
+                        %% populated, string-keyed table already decodes to a map.
+                        case Overrides0 of
+                            Overrides when is_map(Overrides) ->
+                                asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}, Overrides),
+                                {[true], St};
+                            [] ->
+                                asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}, #{}),
+                                {[true], St};
+                            _ ->
+                                error_result(
+                                    ~"zone.spawn requires (template_id, x, y[, overrides])", St
+                                )
+                        end;
+                    false ->
+                        {[false], St}
                 end;
             _ ->
                 error_result(~"zone.spawn requires (template_id, x, y[, overrides])", St)
@@ -745,6 +778,27 @@ fun_zone_spawn(#{zone_pid := ZonePid}) ->
     end;
 fun_zone_spawn(_) ->
     fun(_, St) -> error_result(~"zone.spawn not available (no zone context)", St) end.
+
+-spec known_template(binary(), map()) -> boolean().
+known_template(TemplateId, #{templates_tab := Tab}) ->
+    %% Read live from the per-zone ETS table asobi_lua_world:zone_ctx/2
+    %% hands us in Ctx, rather than a map value snapshotted into Ctx at
+    %% zone init - see the module-level comment on fun_zone_spawn/1 above.
+    %% Reads work from any process (the table is `protected`, not tied to
+    %% a specific writer's identity); only the owning zone process ever
+    %% writes to it (asobi_lua_world:init_zone_state/2 and
+    %% spawn_templates_hint/1), so this is always the latest hot-reloaded
+    %% set.
+    case ets:lookup(Tab, known) of
+        [{known, Templates}] when is_map(Templates) -> maps:is_key(TemplateId, Templates);
+        _ -> true
+    end;
+known_template(_TemplateId, _Ctx) ->
+    %% Deliberate fail-open, not an accidental gap: a Ctx with no
+    %% `templates_tab` (older/non-world callers, direct API tests that
+    %% never populate one) stays unrestricted. Only a genuine per-zone Ctx
+    %% (built by zone_ctx/2) ever enforces the known-template allowlist.
+    true.
 
 fun_zone_despawn(#{zone_pid := ZonePid}) ->
     fun(Args, St) ->
