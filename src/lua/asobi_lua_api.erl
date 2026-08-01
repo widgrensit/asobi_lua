@@ -546,19 +546,46 @@ fun_spatial_query_radius(Ctx) ->
                     error ->
                         error_result(~"query_radius(x, y, radius) requires zone context", St)
                 end;
-            [Entities, X, Y, Radius] when
-                is_map(Entities), is_number(X), is_number(Y), is_number(Radius)
+            [Entities0, X, Y, Radius] when
+                is_number(X), is_number(Y), is_number(Radius)
             ->
-                Results = asobi_spatial:query_radius(atomize_entities(Entities), {X, Y}, Radius),
-                encode_spatial_results(Results, St);
-            [Entities, X, Y, Radius, OptsRaw] when
-                is_map(Entities), is_number(X), is_number(Y), is_number(Radius)
+                %% An empty Lua table `{}` decodes (via deep_decode/1) to `[]`,
+                %% not `#{}` - there are no pairs to infer a map from. A
+                %% populated, string-keyed table already decodes to a map.
+                case Entities0 of
+                    Entities when is_map(Entities) ->
+                        Results = asobi_spatial:query_radius(
+                            atomize_entities(Entities), {X, Y}, Radius
+                        ),
+                        encode_spatial_results(Results, St);
+                    [] ->
+                        Results = asobi_spatial:query_radius(#{}, {X, Y}, Radius),
+                        encode_spatial_results(Results, St);
+                    _ ->
+                        error_result(
+                            ~"query_radius requires (x, y, radius) or (entities, x, y, radius[, opts])",
+                            St
+                        )
+                end;
+            [Entities0, X, Y, Radius, OptsRaw] when
+                is_number(X), is_number(Y), is_number(Radius)
             ->
                 Opts = decode_spatial_opts(OptsRaw),
-                Results = asobi_spatial:query_radius(
-                    atomize_entities(Entities), {X, Y}, Radius, Opts
-                ),
-                encode_spatial_results(Results, St);
+                case Entities0 of
+                    Entities when is_map(Entities) ->
+                        Results = asobi_spatial:query_radius(
+                            atomize_entities(Entities), {X, Y}, Radius, Opts
+                        ),
+                        encode_spatial_results(Results, St);
+                    [] ->
+                        Results = asobi_spatial:query_radius(#{}, {X, Y}, Radius, Opts),
+                        encode_spatial_results(Results, St);
+                    _ ->
+                        error_result(
+                            ~"query_radius requires (x, y, radius) or (entities, x, y, radius[, opts])",
+                            St
+                        )
+                end;
             _ ->
                 error_result(
                     ~"query_radius requires (x, y, radius) or (entities, x, y, radius[, opts])", St
@@ -584,15 +611,38 @@ fun_spatial_query_rect(_) ->
 fun_spatial_nearest() ->
     fun(Args, St) ->
         case decode_args(Args, St) of
-            [Entities, X, Y, N] when is_map(Entities), is_number(X), is_number(Y), is_number(N) ->
-                Results = asobi_spatial:nearest(atomize_entities(Entities), {X, Y}, trunc(N)),
-                encode_spatial_results(Results, St);
-            [Entities, X, Y, N, OptsRaw] when
-                is_map(Entities), is_number(X), is_number(Y), is_number(N)
+            [Entities0, X, Y, N] when is_number(X), is_number(Y), is_number(N) ->
+                %% An empty Lua table `{}` decodes (via deep_decode/1) to `[]`,
+                %% not `#{}` - there are no pairs to infer a map from. A
+                %% populated, string-keyed table already decodes to a map.
+                case Entities0 of
+                    Entities when is_map(Entities) ->
+                        Results = asobi_spatial:nearest(
+                            atomize_entities(Entities), {X, Y}, trunc(N)
+                        ),
+                        encode_spatial_results(Results, St);
+                    [] ->
+                        Results = asobi_spatial:nearest(#{}, {X, Y}, trunc(N)),
+                        encode_spatial_results(Results, St);
+                    _ ->
+                        error_result(~"nearest requires (entities, x, y, n[, opts])", St)
+                end;
+            [Entities0, X, Y, N, OptsRaw] when
+                is_number(X), is_number(Y), is_number(N)
             ->
                 Opts = decode_spatial_opts(OptsRaw),
-                Results = asobi_spatial:nearest(atomize_entities(Entities), {X, Y}, trunc(N), Opts),
-                encode_spatial_results(Results, St);
+                case Entities0 of
+                    Entities when is_map(Entities) ->
+                        Results = asobi_spatial:nearest(
+                            atomize_entities(Entities), {X, Y}, trunc(N), Opts
+                        ),
+                        encode_spatial_results(Results, St);
+                    [] ->
+                        Results = asobi_spatial:nearest(#{}, {X, Y}, trunc(N), Opts),
+                        encode_spatial_results(Results, St);
+                    _ ->
+                        error_result(~"nearest requires (entities, x, y, n[, opts])", St)
+                end;
             _ ->
                 error_result(~"nearest requires (entities, x, y, n[, opts])", St)
         end
