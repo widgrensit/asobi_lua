@@ -923,7 +923,7 @@ restore_game_state(ZoneState0, LuaSt) ->
         _ -> {nil, LuaSt}
     end.
 
--spec zone_ctx(map(), ets:tid()) -> map().
+-spec zone_ctx(map(), ets:table()) -> map().
 zone_ctx(Config, TemplatesTab) ->
     GameConfig = maps:get(game_config, Config, #{}),
     #{
