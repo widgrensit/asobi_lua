@@ -669,13 +669,25 @@ decode_spatial_opts(_) ->
 %% Luerl VM runs inside the zone process (zone_pid =:= self(), see
 %% asobi_lua_world:zone_ctx/2), so making the call synchronous to learn
 %% whether the template_id resolved would deadlock the zone. Instead the
-%% zone's declared template set is cached in Ctx at zone init
-%% (asobi_zone_spawner:set_templates/2 only ever runs then, so it can't go
-%% stale within a zone's lifetime) and checked here, before the cast, so a
+%% zone's declared template set is checked here, before the cast, so a
 %% typo'd template_id returns `false` synchronously instead of a `true` that
-%% just means "the cast was sent", not "something spawned". Ctx without a
-%% `known_templates` key (older/non-world callers, direct API tests) stays
-%% unrestricted - only zone_ctx/2 populates it.
+%% just means "the cast was sent", not "something spawned".
+%%
+%% asobi#253: that template set is read live via known_template/2, NOT
+%% cached in Ctx - a Ctx snapshot taken at zone init goes stale forever
+%% after a script hot-reload adds/renames a template (asobi_lua_reload
+%% re-executes the edited script into the existing Luerl state without
+%% ever re-running install/2, so a Ctx-captured closure never sees the
+%% update). See asobi_lua_world's ?TEMPLATES_KEY.
+%%
+%% Note this closure (and known_template/2 below) does NOT run in the zone
+%% process: asobi_lua_loader:call/4 (used for every Lua callback with a
+%% wall-clock budget, i.e. everything but handle_input/3) spawns a
+%% short-lived worker to run the actual Lua call, so `self()` here is that
+%% worker, not `ZonePid`. That is exactly why the live template set lives
+%% in a `protected` ETS table keyed by reference (readable from any
+%% process), not the process dictionary of whichever process happens to be
+%% running this callback.
 fun_zone_spawn(#{zone_pid := ZonePid} = Ctx) ->
     fun(Args, St) ->
         case decode_args(Args, St) of
@@ -718,9 +730,24 @@ fun_zone_spawn(_) ->
     fun(_, St) -> error_result(~"zone.spawn not available (no zone context)", St) end.
 
 -spec known_template(binary(), map()) -> boolean().
-known_template(TemplateId, #{known_templates := Templates}) ->
-    maps:is_key(TemplateId, Templates);
+known_template(TemplateId, #{templates_tab := Tab}) ->
+    %% Read live from the per-zone ETS table asobi_lua_world:zone_ctx/2
+    %% hands us in Ctx, rather than a map value snapshotted into Ctx at
+    %% zone init - see the module-level comment on fun_zone_spawn/1 above.
+    %% Reads work from any process (the table is `protected`, not tied to
+    %% a specific writer's identity); only the owning zone process ever
+    %% writes to it (asobi_lua_world:init_zone_state/2 and
+    %% spawn_templates_hint/1), so this is always the latest hot-reloaded
+    %% set.
+    case ets:lookup(Tab, known) of
+        [{known, Templates}] when is_map(Templates) -> maps:is_key(TemplateId, Templates);
+        _ -> true
+    end;
 known_template(_TemplateId, _Ctx) ->
+    %% Deliberate fail-open, not an accidental gap: a Ctx with no
+    %% `templates_tab` (older/non-world callers, direct API tests that
+    %% never populate one) stays unrestricted. Only a genuine per-zone Ctx
+    %% (built by zone_ctx/2) ever enforces the known-template allowlist.
     true.
 
 fun_zone_despawn(#{zone_pid := ZonePid}) ->

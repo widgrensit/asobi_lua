@@ -40,7 +40,9 @@ zone_spawn_test_() ->
         {"game.zone.spawn from Lua reaches a live zone built via handle_continue",
             fun lua_spawn_reaches_zone/0},
         {"game.zone.spawn returns false for a typo'd template_id, true for a known one",
-            fun typo_template_id_returns_false/0}
+            fun typo_template_id_returns_false/0},
+        {"a template added by a script hot-reload is spawnable, not just registered",
+            fun hot_reloaded_template_is_spawnable/0}
     ]}.
 
 zone_config() ->
@@ -132,9 +134,11 @@ lua_spawn_reaches_zone() ->
     erlang:erase({asobi_lua_world, zone_state}).
 
 %% asobi_lua#110: game.zone.spawn checks the zone's declared template set
-%% (cached in zone_ctx/2 at init) synchronously, before ever casting to the
-%% zone process - a typo'd template_id must return false, not the true a
-%% caller would wrongly get just because the fire-and-forget cast was sent.
+%% (read live from the per-zone ETS table init_zone_state/2 creates - see
+%% asobi_lua_world's ?TEMPLATES_KEY) synchronously, before ever casting to
+%% the zone process - a typo'd template_id must return false, not the true
+%% a caller would wrongly get just because the fire-and-forget cast was
+%% sent.
 typo_template_id_returns_false() ->
     erlang:erase({asobi_lua_world, zone_state}),
     ZoneState0 = asobi_lua_world:init_zone_state(typo_zone_config(), #{}),
@@ -153,6 +157,63 @@ typo_template_id_returns_false() ->
         Dumped
     ),
     erlang:erase({asobi_lua_world, zone_state}).
+
+%% asobi#253 + asobi_lua#110: a template added by a script hot-reload must
+%% become spawnable from Lua, not just registered with the zone's spawner.
+%% Regression for the Ctx-cached `known_templates` snapshot going stale
+%% forever after the first hot reload - asobi_lua_reload re-executes the
+%% edited script into the EXISTING Luerl state without ever re-running
+%% asobi_lua_api:install/2, so a Ctx-captured closure never saw the update.
+hot_reloaded_template_is_spawnable() ->
+    OldEnv = application:get_env(asobi_lua, reload_mode),
+    application:set_env(asobi_lua, reload_mode, auto),
+    try
+        Dir = temp_dir(),
+        Path = filename:join(Dir, "world.lua"),
+        ok = file:write_file(Path, fixture_body("reload_world_v1.lua")),
+        Cfg = #{
+            world_id => ~"reload_probe",
+            coords => {0, 0},
+            game_module => asobi_lua_world,
+            game_config => #{lua_script => list_to_binary(Path)},
+            world_server_pid => self()
+        },
+        erlang:erase({asobi_lua_world, zone_state}),
+        ZS0 = asobi_lua_world:init_zone_state(Cfg, #{}),
+
+        %% v2 declares an extra `dragon` template and spawns it from
+        %% zone_tick, on the very tick the reload lands.
+        ok = file:write_file(Path, fixture_body("reload_world_v2.lua")),
+        ZS0b = ZS0#{script_mtime => {{1970, 1, 1}, {0, 0, 0}}},
+        {_Ents, ZS1} = asobi_lua_world:zone_tick(#{}, ZS0b),
+        flush_casts(),
+
+        ?assertMatch({changed, _}, asobi_lua_world:spawn_templates_hint(ZS1)),
+        {changed, Templates} = asobi_lua_world:spawn_templates_hint(ZS1),
+        ?assert(maps:is_key(~"dragon", Templates)),
+
+        #{~"game_state" := GS} = asobi_lua_world:dump_zone_state(ZS1),
+        ?assertEqual(true, maps:get(~"dragon_result", GS)),
+        erlang:erase({asobi_lua_world, zone_state})
+    after
+        restore(reload_mode, OldEnv)
+    end.
+
+restore(Key, {ok, V}) -> application:set_env(asobi_lua, Key, V);
+restore(Key, undefined) -> application:unset_env(asobi_lua, Key).
+
+temp_dir() ->
+    Base = filename:join([
+        "/tmp",
+        "asobi_lua_reload_zone_test",
+        integer_to_list(erlang:unique_integer([positive]))
+    ]),
+    ok = filelib:ensure_dir(filename:join(Base, "x")),
+    Base.
+
+fixture_body(Name) ->
+    {ok, Bin} = file:read_file(fixture(Name)),
+    Bin.
 
 unseeded_game_state_round_trips_as_nil() ->
     %% A zone snapshotted before its first seeding tick has game_state = nil.

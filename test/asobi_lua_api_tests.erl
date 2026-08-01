@@ -412,9 +412,9 @@ zone_spawn_with_overrides() ->
     {ok, [true | _], _} = eval(Code, St),
     ?assert(meck:called(asobi_zone, spawn_entity, [self(), ~"goblin", '_', '_'])).
 
-%% asobi_lua#110: a Ctx carrying a known_templates set (as zone_ctx/2 builds
-%% for a real per-zone VM) still spawns and returns true for a declared
-%% template_id.
+%% asobi_lua#110: a live known-template set (as init_zone_state/2 stashes
+%% in the process dictionary for a real per-zone VM) still spawns and
+%% returns true for a declared template_id.
 zone_spawn_known_template() ->
     St = install_api_with_zone_templates(#{~"goblin" => #{type => ~"npc"}}),
     Code = "return game.zone.spawn('goblin', 10.0, 20.0)",
@@ -546,15 +546,19 @@ install_api_with_zone() ->
     Ctx = #{match_id => ~"test-match", match_pid => self(), zone_pid => self()},
     asobi_lua_api:install(Ctx, St0).
 
-%% asobi_lua#110: mirrors the Ctx shape asobi_lua_world:zone_ctx/2 builds for
-%% a real per-zone VM, with a declared known_templates set.
+%% asobi_lua#110 + asobi#253: known_template/2 reads the live template set
+%% from a `templates_tab` ETS table reference in Ctx (see
+%% asobi_lua_world:zone_ctx/2 and its ?TEMPLATES_KEY), not a map value
+%% snapshotted directly into Ctx - mirror that shape here.
 install_api_with_zone_templates(Templates) ->
     {ok, St0} = asobi_lua_loader:new(fixture("test_match.lua")),
+    Tab = ets:new(test_templates, [set, protected]),
+    ets:insert(Tab, {known, Templates}),
     Ctx = #{
         match_id => ~"test-match",
         match_pid => self(),
         zone_pid => self(),
-        known_templates => Templates
+        templates_tab => Tab
     },
     asobi_lua_api:install(Ctx, St0).
 
