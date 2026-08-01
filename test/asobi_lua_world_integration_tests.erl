@@ -59,13 +59,19 @@ spawn_templates_reach_a_real_zone_test_() ->
             {ok, ZonePid} = asobi_zone_manager:get_zone(ZoneManagerPid, {0, 0}),
             %% zone_tick spawns on tick 1, the spawn cast lands on a
             %% following tick - poll rather than a fixed sleep.
+            %% The probe is inserted directly by game.zone.spawn, but the
+            %% whole entity map round-trips through zone_tick's return value
+            %% (decode_to_map + atomize_entities) on every subsequent tick
+            %% regardless of whether the script touches it - see
+            %% widgrensit/asobi#270 - so by the time this poll succeeds the
+            %% probe's own keys are atoms too.
             Probes = poll_until(
                 fun() ->
                     Entities = asobi_zone:get_entities(ZonePid),
                     [
                         E
                      || {_Id, E} <- maps:to_list(Entities),
-                        maps:get(~"type", E, undefined) =:= ~"object"
+                        maps:get(type, E, undefined) =:= ~"object"
                     ]
                 end,
                 fun(Found) -> Found =/= [] end,
@@ -73,7 +79,7 @@ spawn_templates_reach_a_real_zone_test_() ->
             ),
             ?assertEqual(1, length(Probes)),
             [Probe] = Probes,
-            ?assertEqual(true, maps:get(~"solid", Probe))
+            ?assertEqual(true, maps:get(solid, Probe))
         after
             catch exit(InstancePid, shutdown)
         end

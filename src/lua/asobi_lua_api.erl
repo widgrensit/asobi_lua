@@ -81,6 +81,7 @@ their value directly.
 -export([install/2]).
 -export([deep_decode/1, decode_to_map/2]).
 -export([to_storage_value/1]).
+-export([atomize_entities/1]).
 
 -spec install(map(), dynamic()) -> dynamic().
 install(Ctx, St0) ->
@@ -982,8 +983,13 @@ to_bin(A) when is_atom(A) -> atom_to_binary(A);
 to_bin(T) -> list_to_binary(io_lib:format("~p", [T])).
 
 %% --- Entity key conversion ---
-%% Lua tables use binary keys ("x"), asobi_spatial expects atom keys (x).
-
+%% Lua tables use binary keys ("x"), but every atom-keyed consumer downstream
+%% - asobi_spatial here, and asobi_zone's own tick/crossing/grid logic once
+%% asobi_lua_world hands its decoded entities back across the boundary -
+%% expects atom keys (x). Exported so asobi_lua_world can atomize its
+%% zone_tick/handle_input results before they re-enter the shared,
+%% game-module-agnostic asobi_zone code path. See widgrensit/asobi#270.
+-spec atomize_entities(map()) -> map().
 atomize_entities(Entities) ->
     maps:map(
         fun

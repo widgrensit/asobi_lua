@@ -180,6 +180,16 @@ zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
     %% Mirrors asobi_lua_match's per-tick reload — keeps live worlds in sync
     %% with on-disk edits without restarting the zone process.
     ZoneState = asobi_lua_reload:maybe_hot_reload(ZoneState1),
+    %% Entities returned here (and from handle_input/3 below) feed straight
+    %% into asobi_zone's shared, game-module-agnostic tick path - crossing
+    %% detection, snapshotting, grid maintenance - all of which pattern-match
+    %% atom keys (#{type := ..., x := ..., y := ...}). decode_to_map/2 builds
+    %% straight off Luerl's binary-keyed proplist output, so without
+    %% atomize_entities/1 here every one of those clauses silently no-ops for
+    %% a Lua world instead of matching. atomize_entities/1 only rewrites map
+    %% keys, never values, and luerl:encode/2 turns an atom key back into the
+    %% identical binary Lua sees either way (atom_to_binary/2) - so this is
+    %% invisible to the Lua script on the next tick. See widgrensit/asobi#270.
     Result =
         case maps:get(lua_state, ZoneState, undefined) of
             undefined ->
@@ -193,11 +203,13 @@ zone_tick(Entities, ZoneState0) when is_map(ZoneState0) ->
                     )
                 of
                     {ok, [Ents1, ZS1 | _], LuaSt2} ->
-                        {decode_to_map(Ents1, LuaSt2), ZoneState#{
+                        {asobi_lua_api:atomize_entities(decode_to_map(Ents1, LuaSt2)), ZoneState#{
                             lua_state => LuaSt2, game_state => ZS1
                         }};
                     {ok, [Ents1 | _], LuaSt2} ->
-                        {decode_to_map(Ents1, LuaSt2), ZoneState#{lua_state => LuaSt2}};
+                        {asobi_lua_api:atomize_entities(decode_to_map(Ents1, LuaSt2)), ZoneState#{
+                            lua_state => LuaSt2
+                        }};
                     {error, Reason} ->
                         log_lua_error(zone_tick, Reason, ZoneState),
                         {Entities, ZoneState}
@@ -223,7 +235,7 @@ handle_input(PlayerId, Input, Entities) ->
             of
                 {ok, [Ents1 | _], LuaSt3} ->
                     erlang:put(?PD_KEY, ZoneState#{lua_state => LuaSt3}),
-                    {ok, decode_to_map(Ents1, LuaSt3)};
+                    {ok, asobi_lua_api:atomize_entities(decode_to_map(Ents1, LuaSt3))};
                 {error, Reason} ->
                     log_lua_error(handle_input, Reason, ZoneState),
                     ZoneState1 = asobi_lua_dev_errors:maybe_notify(
