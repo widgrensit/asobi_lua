@@ -366,7 +366,7 @@ bots_enabled(BotProps) ->
 bots_min_players(BotProps, MatchSize) ->
     case proplists:get_value(~"min_players", BotProps) of
         MP when is_number(MP), MP > 0 -> clamp_bot_fill(trunc(MP));
-        _ -> MatchSize
+        _ -> clamp_bot_fill(MatchSize)
     end.
 
 clamp_bot_fill(MP) when MP > ?MAX_BOT_FILL ->
