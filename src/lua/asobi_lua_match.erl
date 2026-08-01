@@ -131,13 +131,7 @@ join(PlayerId, Ctx, #{lua_state := LuaSt, game_state := GS} = State) when is_map
         {ok, [GS1 | _], LuaSt1} ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
         {error, Reason} ->
-            ?LOG_WARNING(#{
-                msg => ~"lua join error",
-                player_id => PlayerId,
-                reason_class => asobi_lua_game_error:reason_class(Reason),
-                detail => asobi_lua_game_error:format_reason(Reason)
-            }),
-            _ = asobi_lua_game_error:emit(join, Reason, maps:get(script, State, ~"<unknown>")),
+            log_match_lua_error(warning, join, Reason, State, #{player_id => PlayerId}),
             {error, Reason}
     end.
 
@@ -147,13 +141,7 @@ leave(PlayerId, #{lua_state := LuaSt, game_state := GS} = State) ->
         {ok, [GS1 | _], LuaSt1} ->
             {ok, State#{lua_state => LuaSt1, game_state => GS1}};
         {error, Reason} ->
-            ?LOG_WARNING(#{
-                msg => ~"lua leave error",
-                player_id => PlayerId,
-                reason_class => asobi_lua_game_error:reason_class(Reason),
-                detail => asobi_lua_game_error:format_reason(Reason)
-            }),
-            _ = asobi_lua_game_error:emit(leave, Reason, maps:get(script, State, ~"<unknown>")),
+            log_match_lua_error(warning, leave, Reason, State, #{player_id => PlayerId}),
             {ok, State}
     end.
 
@@ -169,15 +157,7 @@ handle_input(PlayerId, Input, #{lua_state := LuaSt, game_state := GS} = State) -
             %% The raw reason can embed player input via Lua error()/assert()
             %% and is unbounded - log a classified, capped rendering so a
             %% failing handler under input load cannot amplify into the logs.
-            ?LOG_WARNING(#{
-                msg => ~"lua input error",
-                player_id => PlayerId,
-                reason_class => asobi_lua_game_error:reason_class(Reason),
-                detail => asobi_lua_game_error:format_reason(Reason)
-            }),
-            _ = asobi_lua_game_error:emit(
-                handle_input, Reason, maps:get(script, State, ~"<unknown>")
-            ),
+            log_match_lua_error(warning, handle_input, Reason, State, #{player_id => PlayerId}),
             State1 = asobi_lua_dev_errors:maybe_notify(handle_input, Reason, PlayerId, State),
             {ok, State1}
     end.
@@ -194,16 +174,10 @@ tick(State0) ->
                     {ok, State#{lua_state => LuaSt1, game_state => GS1}}
             end;
         {error, timeout} ->
-            ?LOG_ERROR(#{msg => ~"lua tick timeout", script => maps:get(script, State)}),
-            _ = asobi_lua_game_error:emit(tick, timeout, maps:get(script, State, ~"<unknown>")),
+            log_match_lua_error(error, tick, timeout, State),
             {ok, State};
         {error, Reason} ->
-            ?LOG_ERROR(#{
-                msg => ~"lua tick error",
-                reason_class => asobi_lua_game_error:reason_class(Reason),
-                detail => asobi_lua_game_error:format_reason(Reason)
-            }),
-            _ = asobi_lua_game_error:emit(tick, Reason, maps:get(script, State, ~"<unknown>")),
+            log_match_lua_error(error, tick, Reason, State),
             {ok, State}
     end.
 
@@ -244,6 +218,41 @@ vote_resolved(Template, Result, #{lua_state := LuaSt, game_state := GS} = State)
     end.
 
 %% --- Internal ---
+
+%% asobi#252: a script failing on every tick (or every join/leave/input)
+%% would otherwise log once per call forever. Rate-limited per
+%% {Script, Callback} via asobi_script_log_limiter (shared with
+%% asobi_lua_world:log_lua_error/3 and asobi's own log_spawn_failed/3);
+%% telemetry emit stays unconditional so dashboards/alerts see the true
+%% failure rate. Level is caller-chosen: a broken tick/1 is worse than a
+%% broken join/2 (one player vs. the whole match), so it stays ?LOG_ERROR
+%% while join/leave/handle_input stay ?LOG_WARNING, matching each site's
+%% severity before this rate limit was added.
+-spec log_match_lua_error(logger:level(), atom(), term(), map()) -> ok.
+log_match_lua_error(Level, Callback, Reason, State) ->
+    log_match_lua_error(Level, Callback, Reason, State, #{}).
+
+-spec log_match_lua_error(logger:level(), atom(), term(), map(), map()) -> ok.
+log_match_lua_error(Level, Callback, Reason, State, ExtraMeta) ->
+    Script = maps:get(script, State, ~"<unknown>"),
+    case asobi_script_log_limiter:allow({Script, Callback}) of
+        {true, SuppressedSinceLast} ->
+            Report = maps:merge(ExtraMeta, #{
+                msg => ~"lua callback failed",
+                callback => Callback,
+                script => Script,
+                reason_class => asobi_lua_game_error:reason_class(Reason),
+                detail => asobi_lua_game_error:format_reason(Reason),
+                suppressed_since_last => SuppressedSinceLast
+            }),
+            case Level of
+                warning -> ?LOG_WARNING(Report);
+                error -> ?LOG_ERROR(Report)
+            end;
+        false ->
+            ok
+    end,
+    asobi_lua_game_error:emit(Callback, Reason, Script).
 
 is_finished(GS, LuaSt) ->
     try

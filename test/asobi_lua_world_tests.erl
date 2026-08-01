@@ -727,6 +727,50 @@ hot_reload_zone_tick_signals_spawn_templates_hint_test() ->
         file:delete(Path)
     end.
 
+hot_reload_broken_spawn_templates_does_not_wipe_hint_test() ->
+    %% asobi#253 F1: a hot-edit that breaks spawn_templates must not report
+    %% {changed, #{}} - that would tell asobi_zone to replace the zone's
+    %% whole live template set with nothing, wiping every spawnable
+    %% template out of an already-running zone over one bad edit.
+    Path = world_temp_script(
+        ~"""
+        function init(_) return {} end
+        function spawn_position(_, _) return { x = 0, y = 0 } end
+        function generate_world(_, _) return { ['0,0'] = {} } end
+        function zone_tick(e, z) return e, z end
+        function handle_input(_, _, e) return e end
+        function post_tick(_, s) return s end
+        function spawn_templates(_) return { goblin = { max_count = 3 } } end
+        """
+    ),
+    try
+        Config = #{game_config => #{lua_script => Path}, mode => ~"test"},
+        {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+        Zone0 = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
+        erlang:erase({asobi_lua_world, zone_state}),
+        {_Ents0, Zone1} = asobi_lua_world:zone_tick(#{}, Zone0),
+
+        ok = file:write_file(
+            Path,
+            ~"""
+            function init(_) return {} end
+            function spawn_position(_, _) return { x = 0, y = 0 } end
+            function generate_world(_, _) return { ['0,0'] = {} } end
+            function zone_tick(e, z) return e, z end
+            function handle_input(_, _, e) return e end
+            function post_tick(_, s) return s end
+            function spawn_templates(_) error("boom") end
+            """
+        ),
+        bump_mtime(Path),
+
+        {_Ents1, Zone2} = asobi_lua_world:zone_tick(#{}, Zone1),
+        ?assertEqual(unchanged, asobi_lua_world:spawn_templates_hint(Zone2))
+    after
+        erlang:erase({asobi_lua_world, zone_state}),
+        file:delete(Path)
+    end.
+
 %% --- Script-error log rate limiting (asobi#252) ---
 %%
 %% log_lua_error/3 gates its ?LOG_WARNING behind asobi_script_log_limiter,

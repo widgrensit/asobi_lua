@@ -13,7 +13,11 @@ Behaviour:
   survives reload, because the script body only reassigns globals and
   redefines functions; existing locals and table fields are not touched
   unless the script explicitly re-runs `init()`.
-- Erlang-side state (the wrapper map) is untouched.
+- Erlang-side state (the wrapper map) is otherwise untouched, except for one
+  output field: a successful reload stamps `just_reloaded => true` for
+  exactly the tick that reloaded, cleared on every other call (including a
+  live `reload_mode` flip to `off`). `asobi_lua_world` reads this to drive
+  `spawn_templates_hint/1` (asobi#253); `asobi_lua_match` ignores it.
 - A syntax error in the new script logs a warning, remembers the new mtime
   (so we don't keep retrying the same broken file), and keeps running the
   old code until the file is fixed.
@@ -65,28 +69,30 @@ per-tick stat overhead can set `asobi_lua.reload_mode` (or the
 
 -spec maybe_hot_reload(map()) -> map().
 maybe_hot_reload(State) ->
+    %% just_reloaded is a one-tick signal, not a state field - clear it
+    %% unconditionally on every call so it can never survive past the tick
+    %% that actually reloaded the script, regardless of which branch below
+    %% runs next (including a live reload_mode flip to `off` mid-flight).
+    State0 = maps:remove(just_reloaded, State),
     case reload_mode() of
-        off -> State;
-        auto -> do_maybe_reload(State)
+        off -> State0;
+        auto -> do_maybe_reload(State0)
     end.
 
 -spec do_maybe_reload(map()) -> map().
 do_maybe_reload(#{script := Path, script_mtime := OldMtime, lua_state := LuaSt} = State) ->
-    %% just_reloaded is a one-tick signal, not a state field - clear it here so
-    %% it never survives past the tick that actually reloaded the script.
-    State0 = maps:remove(just_reloaded, State),
     case filelib:last_modified(Path) of
         0 ->
-            State0;
+            State;
         OldMtime ->
-            State0;
+            State;
         NewMtime ->
             case reload_script(Path, LuaSt) of
                 {ok, NewLuaSt} ->
                     ?LOG_NOTICE(#{
                         msg => ~"lua hot reload", script => Path, mtime => NewMtime
                     }),
-                    State0#{
+                    State#{
                         lua_state => NewLuaSt,
                         script_mtime => NewMtime,
                         just_reloaded => true
@@ -97,7 +103,7 @@ do_maybe_reload(#{script := Path, script_mtime := OldMtime, lua_state := LuaSt} 
                         script => Path,
                         reason => Reason
                     }),
-                    State0#{script_mtime => NewMtime}
+                    State#{script_mtime => NewMtime}
             end
     end;
 do_maybe_reload(State) ->

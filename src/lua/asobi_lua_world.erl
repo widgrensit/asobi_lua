@@ -381,13 +381,34 @@ spawn_templates(_) ->
     #{}.
 
 %% asobi#253: maybe_hot_reload/1 stamps `just_reloaded => true` on the zone
-%% state for exactly the tick it swaps in a freshly-reloaded lua_state - reuse
-%% spawn_templates/1's cheap clause (already-loaded lua_state, no fresh VM
-%% boot) rather than re-decide "did anything change" ourselves.
+%% state for exactly the tick it swaps in a freshly-reloaded lua_state.
+%%
+%% This deliberately does NOT delegate to spawn_templates/1: that function
+%% collapses "not defined" and "the Lua call raised/timed out" to the same
+%% #{} result, which is correct at zone creation (an empty template set is
+%% the right starting point either way) but wrong here - spawn_templates_hint
+%% REPLACES the zone's whole live template set (asobi_zone_spawner:set_templates/2),
+%% so a broken hot-edit would silently wipe every spawnable template out of an
+%% already-running zone. Only a genuine successful decode is reported as
+%% {changed, _}; "not defined" and "call failed" both leave the zone's
+%% existing templates alone. Requires lua_state directly (rather than falling
+%% through to spawn_templates/1's raw-config clause) so a state that somehow
+%% lost its lua_state can't trigger an expensive throwaway-VM boot every tick.
 -spec spawn_templates_hint(map()) ->
     unchanged | {changed, #{binary() => asobi_zone_spawner:spawn_template()}}.
-spawn_templates_hint(#{just_reloaded := true} = State) ->
-    {changed, spawn_templates(State)};
+spawn_templates_hint(#{just_reloaded := true, lua_state := LuaSt} = State) ->
+    case asobi_lua_loader:is_defined(spawn_templates, LuaSt) of
+        false ->
+            unchanged;
+        true ->
+            case asobi_lua_loader:call(spawn_templates, [#{}], LuaSt, ?INIT_TIMEOUT) of
+                {ok, [TemplatesRef | _], LuaSt1} ->
+                    {changed, decode_spawn_templates(TemplatesRef, LuaSt1)};
+                {error, Reason} ->
+                    log_lua_error(spawn_templates_hint, Reason, State),
+                    unchanged
+            end
+    end;
 spawn_templates_hint(_State) ->
     unchanged.
 

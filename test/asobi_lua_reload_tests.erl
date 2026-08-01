@@ -5,7 +5,9 @@ reload_mode_test_() ->
     [
         {"reload_mode = off skips the stat", fun off_short_circuits/0},
         {"reload_mode = auto polls mtime", fun auto_polls/0},
-        {"unknown env value falls back to auto", fun unknown_env_is_auto/0}
+        {"unknown env value falls back to auto", fun unknown_env_is_auto/0},
+        {"reload_mode = off clears a stale just_reloaded flag",
+            fun off_clears_stale_just_reloaded_flag/0}
     ].
 
 %% When reload_mode is `off`, the function returns the state unchanged
@@ -66,6 +68,27 @@ unknown_env_is_auto() ->
             false -> os:putenv("ASOBI_LUA_RELOAD", "");
             V -> os:putenv("ASOBI_LUA_RELOAD", V)
         end
+    end.
+
+%% just_reloaded is a one-tick signal, not persistent state. If a reload
+%% stamps it true on one tick and reload_mode flips to `off` before the
+%% next, the flag must not survive - a caller like
+%% asobi_lua_world:spawn_templates_hint/1 would otherwise see
+%% just_reloaded => true forever and re-apply "changed" every tick.
+off_clears_stale_just_reloaded_flag() ->
+    OldEnv = application:get_env(asobi_lua, reload_mode),
+    application:set_env(asobi_lua, reload_mode, off),
+    try
+        State = #{
+            script => "/nonexistent-but-doesnt-matter.lua",
+            script_mtime => {{1970, 1, 1}, {0, 0, 0}},
+            lua_state => fake_lua_state,
+            just_reloaded => true
+        },
+        Result = asobi_lua_reload:maybe_hot_reload(State),
+        ?assertNot(maps:is_key(just_reloaded, Result))
+    after
+        restore(reload_mode, OldEnv)
     end.
 
 restore(Key, {ok, V}) -> application:set_env(asobi_lua, Key, V);
