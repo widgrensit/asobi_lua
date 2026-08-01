@@ -26,6 +26,10 @@ function terrain_provider(config)            -- return {module, args} or nil
 function on_zone_loaded(cx, cy, state)       -- return zone_state, state
 function on_zone_unloaded(cx, cy, state)     -- return state
 ```
+
+asobi#253: after a hot reload (`ASOBI_LUA_RELOAD`/`reload_mode`), `spawn_templates_hint/1`
+tells the running zone to re-fetch `spawn_templates(config)` so an edited script's new
+templates become spawnable without restarting the zone.
 """.
 
 -behaviour(asobi_world).
@@ -39,7 +43,7 @@ function on_zone_unloaded(cx, cy, state)     -- return state
 -endif.
 -export([generate_world/2, get_state/2]).
 -export([phases/1, on_phase_started/2, on_phase_ended/2]).
--export([spawn_templates/1, on_world_recovered/2]).
+-export([spawn_templates/1, spawn_templates_hint/1, on_world_recovered/2]).
 -export([terrain_provider/1, on_zone_loaded/2, on_zone_unloaded/2]).
 -export([init_zone_state/2, dump_zone_state/1]).
 
@@ -376,6 +380,38 @@ spawn_templates(Config) when is_map(Config) ->
 spawn_templates(_) ->
     #{}.
 
+%% asobi#253: maybe_hot_reload/1 stamps `just_reloaded => true` on the zone
+%% state for exactly the tick it swaps in a freshly-reloaded lua_state.
+%%
+%% This deliberately does NOT delegate to spawn_templates/1: that function
+%% collapses "not defined" and "the Lua call raised/timed out" to the same
+%% #{} result, which is correct at zone creation (an empty template set is
+%% the right starting point either way) but wrong here - spawn_templates_hint
+%% REPLACES the zone's whole live template set (asobi_zone_spawner:set_templates/2),
+%% so a broken hot-edit would silently wipe every spawnable template out of an
+%% already-running zone. Only a genuine successful decode is reported as
+%% {changed, _}; "not defined" and "call failed" both leave the zone's
+%% existing templates alone. Requires lua_state directly (rather than falling
+%% through to spawn_templates/1's raw-config clause) so a state that somehow
+%% lost its lua_state can't trigger an expensive throwaway-VM boot every tick.
+-spec spawn_templates_hint(map()) ->
+    unchanged | {changed, #{binary() => asobi_zone_spawner:spawn_template()}}.
+spawn_templates_hint(#{just_reloaded := true, lua_state := LuaSt} = State) ->
+    case asobi_lua_loader:is_defined(spawn_templates, LuaSt) of
+        false ->
+            unchanged;
+        true ->
+            case asobi_lua_loader:call(spawn_templates, [#{}], LuaSt, ?INIT_TIMEOUT) of
+                {ok, [TemplatesRef | _], LuaSt1} ->
+                    {changed, decode_spawn_templates(TemplatesRef, LuaSt1)};
+                {error, Reason} ->
+                    log_lua_error(spawn_templates_hint, Reason, State),
+                    unchanged
+            end
+    end;
+spawn_templates_hint(_State) ->
+    unchanged.
+
 %% --- World recovery ---
 
 -spec on_world_recovered(map(), map()) -> {ok, map()}.
@@ -513,6 +549,12 @@ allowed_terrain_providers() ->
 %% zone_tick/handle_input swallowed errors silently and only post_tick logged
 %% — so a broken Lua script could degrade gameplay invisibly. State is either
 %% the world State (carries `script`) or a per-zone ZoneState (may not).
+%%
+%% asobi#252: zone_tick/1 and handle_input/3 run per-tick - a script that
+%% fails on every tick would otherwise log once per tick forever. The log
+%% line is rate-limited per {Script, Callback} via asobi_script_log_limiter
+%% (shared with asobi's own log_spawn_failed/3); the telemetry emit below
+%% stays unconditional so dashboards/alerts see the true failure rate.
 log_lua_error(Callback, Reason, StateOrZoneState) ->
     Script = maps:get(script, StateOrZoneState, ~"<unknown>"),
     Severity =
@@ -523,14 +565,20 @@ log_lua_error(Callback, Reason, StateOrZoneState) ->
     %% The raw reason can embed player input via Lua error()/assert() and is
     %% unbounded - log a classified, capped rendering so a failing callback
     %% under input load cannot amplify into the logs.
-    ?LOG_WARNING(#{
-        msg => ~"lua callback failed",
-        callback => Callback,
-        severity => Severity,
-        script => Script,
-        reason_class => asobi_lua_game_error:reason_class(Reason),
-        detail => asobi_lua_game_error:format_reason(Reason)
-    }),
+    case asobi_script_log_limiter:allow({Script, Callback}) of
+        {true, SuppressedSinceLast} ->
+            ?LOG_WARNING(#{
+                msg => ~"lua callback failed",
+                callback => Callback,
+                severity => Severity,
+                script => Script,
+                reason_class => asobi_lua_game_error:reason_class(Reason),
+                detail => asobi_lua_game_error:format_reason(Reason),
+                suppressed_since_last => SuppressedSinceLast
+            });
+        false ->
+            ok
+    end,
     asobi_lua_game_error:emit(Callback, Reason, Script).
 
 decode_position(PosTable, LuaSt) ->

@@ -93,10 +93,20 @@ match state survives the reload because the script body re-declares
 globals and functions in place; existing locals and table fields are
 not touched unless the script explicitly re-runs `init()`.
 
+For world zones, a reload that adds or changes `spawn_templates` also
+takes effect immediately: an already-running zone re-fetches its spawn
+template set on the tick right after the reload, so new templates
+become spawnable without restarting the zone. If the reloaded
+`spawn_templates` itself fails, the zone's existing templates are left
+untouched rather than cleared.
+
 If a new script has a syntax error, the runtime keeps running the old
 code, logs a warning, and remembers the new mtime so it does not retry
 the same broken file every tick. Fix the file, save again, and the
-next tick reloads.
+next tick reloads. The same per-script rate limiting applies to any
+callback that starts failing on every tick (not just syntax errors) —
+the failure is logged at most a few times per window, not once per
+tick forever.
 
 ### Pattern 3 — Signal-driven reload (planned)
 

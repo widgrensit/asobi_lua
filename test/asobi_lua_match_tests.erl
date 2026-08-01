@@ -2,6 +2,9 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("kernel/include/file.hrl").
 
+%% logger handler callback for script_log_limiter_test_/0 below.
+-export([log/2]).
+
 -spec fixture(string()) -> file:filename_all().
 fixture(Name) ->
     {ok, LibDir} = safe_lib_dir(),
@@ -539,3 +542,89 @@ bump_mtime(Path) ->
         calendar:datetime_to_gregorian_seconds({{Y, M, D}, {H, Mi, S}}) + 2
     ),
     ok = file:write_file_info(Path, FI#file_info{mtime = NewMtime}).
+
+%% --- Script-error log rate limiting (asobi#252) ---
+%%
+%% log_match_lua_error/4,5 gates its log line behind asobi_script_log_limiter,
+%% keyed on {Script, Callback} - a tick that fails every call must not flood
+%% the logs. The limiter's own rate math is covered on the asobi side; these
+%% pin the wiring here, mirroring asobi_lua_world_tests's coverage of
+%% log_lua_error/3: the right key is queried, a deny actually suppresses the
+%% log line, and an allow lets it through.
+
+script_log_limiter_test_() ->
+    {foreach, fun log_limiter_setup/0, fun log_limiter_cleanup/1, [
+        {"a denied key is suppressed, not logged per call",
+            fun match_script_log_suppressed_on_deny/0},
+        {"an allowed call is logged with the {script, callback} key intact",
+            fun match_script_log_allowed_key_shape/0}
+    ]}.
+
+log_limiter_setup() ->
+    OldPrimary = logger:get_primary_config(),
+    ok = logger:set_primary_config(level, all),
+    ok = logger:add_handler(?MODULE, ?MODULE, #{config => undefined, level => all}),
+    meck:new(seki, [no_link, passthrough]),
+    OldPrimary.
+
+log_limiter_cleanup(OldPrimary) ->
+    _ = logger:remove_handler(?MODULE),
+    ok = logger:set_primary_config(OldPrimary),
+    meck:unload(seki).
+
+%% eunit runs each foreach test in its own process, so the receiving pid
+%% must be attached per-test, not captured in setup.
+attach_log() ->
+    ok = logger:set_handler_config(?MODULE, config, self()).
+
+log(#{level := Level, msg := {report, Report}}, #{config := Pid}) ->
+    Pid ! {lua_match_log, Level, Report};
+log(_, _) ->
+    ok.
+
+failing_tick_script() ->
+    ~"""
+    match_size = 1
+    function init(_) return {} end
+    function join(id, s) return s end
+    function leave(id, s) return s end
+    function handle_input(_, _, s) return s end
+    function tick(_) error('boom') end
+    function get_state(_, s) return s end
+    """.
+
+match_script_log_suppressed_on_deny() ->
+    attach_log(),
+    meck:expect(seki, check, fun(asobi_script_log_limiter, _Key) -> {deny, 0} end),
+    Path = temp_script(failing_tick_script()),
+    try
+        {ok, S0} = asobi_lua_match:init(#{lua_script => Path}),
+        {ok, _} = asobi_lua_match:tick(S0),
+        {ok, _} = asobi_lua_match:tick(S0),
+        receive
+            {lua_match_log, error, _} -> error(unexpected_log_line_while_denied)
+        after 50 -> ok
+        end,
+        ?assertEqual(2, meck:num_calls(seki, check, [asobi_script_log_limiter, '_']))
+    after
+        file:delete(Path)
+    end.
+
+match_script_log_allowed_key_shape() ->
+    attach_log(),
+    Path = temp_script(failing_tick_script()),
+    meck:expect(seki, check, fun
+        (asobi_script_log_limiter, {S, tick}) when S =:= Path -> {allow, 1};
+        (asobi_script_log_limiter, Other) -> error({unexpected_key, Other})
+    end),
+    try
+        {ok, S0} = asobi_lua_match:init(#{lua_script => Path}),
+        {ok, _} = asobi_lua_match:tick(S0),
+        receive
+            {lua_match_log, error, Report} ->
+                ?assertEqual(tick, maps:get(callback, Report))
+        after 1000 -> error(no_log_received)
+        end
+    after
+        file:delete(Path)
+    end.
