@@ -61,6 +61,67 @@ lua_match_test_() ->
         {"on_phase_ended threads state through the Lua VM", fun on_phase_ended_threads_state/0}
     ].
 
+%% --- Probe VM must not double-fire side effects ---
+%%
+%% Security review on widgrensit/asobi_lua#109/#117: phases/1's raw-config
+%% clause boots a throwaway Lua VM (boot_throwaway_lua_state/2) just to ask
+%% the script "do you define phases()?" - which means the script's whole
+%% top-level body runs a second time. Before the `probe => true` /
+%% install_pure fix, a top-level `game.economy.grant` call fired once from
+%% the real init/1 VM boot and again from this throwaway probe boot - a
+%% double grant on a player-triggered path, with no idempotency key on that
+%% primitive. These pin that exactly one grant reaches asobi_economy, no
+%% matter how many times phases/1 is asked.
+
+probe_vm_side_effects_test_() ->
+    {foreach, fun economy_mock_setup/0, fun economy_mock_cleanup/1, [
+        {
+            "a top-level game.economy.grant call fires once per match creation, "
+            "not once per real init boot plus once per phases() probe boot",
+            fun top_level_grant_fires_once/0
+        }
+    ]}.
+
+economy_mock_setup() ->
+    meck:new(asobi_economy, [no_link]),
+    meck:expect(asobi_economy, grant, fun(_, _, _, _) -> {ok, #{}} end).
+
+economy_mock_cleanup(_) ->
+    meck:unload(asobi_economy).
+
+top_level_grant_fires_once() ->
+    Path = temp_script(
+        ~"""
+        match_size = 1
+        game.economy.grant('p1', 'gold', 100, 'signup')
+        function init(_) return {} end
+        function join(id, s) return s end
+        function leave(id, s) return s end
+        function handle_input(_, _, s) return s end
+        function tick(s) return s end
+        function get_state(_, s) return s end
+        function phases(_)
+            return { { name = 'lobby', duration = 5000 } }
+        end
+        """
+    ),
+    try
+        %% Mirrors asobi_match_server:init/1 exactly: GameMod:init/1 runs
+        %% first against GameConfig (the real, live VM boot - fires the
+        %% top-level grant once), then GameMod:phases(GameConfig) runs
+        %% against the *same* raw config map, since no lua_state is threaded
+        %% through to that second call (see boot_throwaway_lua_state/2's
+        %% moduledoc). Pre-fix this booted a second fully-live VM and fired
+        %% the top-level grant a second time.
+        GameConfig = #{lua_script => Path, match_id => ~"probe_dedupe"},
+        {ok, _State} = asobi_lua_match:init(GameConfig),
+        Phases = asobi_lua_match:phases(GameConfig),
+        ?assertEqual(1, length(Phases)),
+        ?assertEqual(1, meck:num_calls(asobi_economy, grant, '_'))
+    after
+        file:delete(Path)
+    end.
+
 init_ok() ->
     Config = #{lua_script => fixture("test_match.lua")},
     {ok, State} = asobi_lua_match:init(Config),

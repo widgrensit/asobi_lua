@@ -260,9 +260,11 @@ phases(Config) when is_map(Config) ->
     case boot_throwaway_lua_state(Config, phases) of
         {ok, DelegateState} -> phases(DelegateState);
         {error, _} -> []
-    end;
-phases(_) ->
-    [].
+    end.
+%% No catch-all `phases(_) -> []` clause: the -spec restricts the domain to
+%% map(), and the two clauses above already cover every map (the first
+%% matches any map carrying lua_state, the second - `is_map(Config)` -
+%% catches every other map), so a third clause would be unreachable dead code.
 
 -spec on_phase_started(binary(), map()) -> {ok, map()}.
 on_phase_started(PhaseName, #{lua_state := LuaSt, game_state := GS} = State) ->
@@ -338,15 +340,18 @@ is_finished(GS, LuaSt) ->
 decode_to_map(Term, LuaSt) ->
     asobi_lua_api:decode_to_map(Term, LuaSt).
 
-deep_decode(Term) ->
-    asobi_lua_api:deep_decode(Term).
-
 %% phases/1 (the raw-config clause) is invoked by asobi_match_server:init/1
 %% before the match's own lua_state exists - GameMod:init/1 has already run
 %% by then, but its result was never threaded through to this call, only the
 %% original GameConfig. Boot a throwaway VM just to ask the script the one
 %% question, then let it get GC'd. Mirrors asobi_lua_world's
 %% boot_throwaway_lua_state/2.
+%%
+%% `probe => true` in Ctx tells asobi_lua_api:install/2 to stub out every
+%% effectful game.* function (economy/leaderboard/notify/storage/chat/
+%% broadcast) - booting this VM re-runs the script's whole top-level body,
+%% and without this marker any top-level side-effecting call would fire a
+%% second time per match creation (see security review on #109/#117).
 -spec boot_throwaway_lua_state(map(), atom()) -> {ok, map()} | {error, term()}.
 boot_throwaway_lua_state(Config, Caller) ->
     case maps:get(lua_script, Config, undefined) of
@@ -354,7 +359,8 @@ boot_throwaway_lua_state(Config, Caller) ->
             Ctx = #{
                 match_id => maps:get(match_id, Config, undefined),
                 match_pid => self(),
-                script => ScriptPath
+                script => ScriptPath,
+                probe => true
             },
             PreInstall = fun(St) -> asobi_lua_api:install(Ctx, St) end,
             case asobi_lua_loader:new(ScriptPath, ?INIT_TIMEOUT, PreInstall) of
@@ -369,84 +375,6 @@ boot_throwaway_lua_state(Config, Caller) ->
     end.
 
 %% --- Phase decoding ---
-%%
-%% Duplicated from asobi_lua_world:decode_phases/2 and friends rather than
-%% shared, matching this module's existing pattern of small local wrappers
-%% (decode_to_map/2, deep_decode/1 above) instead of a cross-module dependency
-%% for a handful of pure decode helpers.
 
 decode_phases(PhasesRef, LuaSt) ->
-    case luerl:decode(PhasesRef, LuaSt) of
-        Decoded when is_list(Decoded) ->
-            lists:filtermap(
-                fun
-                    ({_, PhaseProps}) when is_list(PhaseProps) ->
-                        Name = proplists:get_value(~"name", PhaseProps),
-                        case Name of
-                            undefined ->
-                                false;
-                            _ ->
-                                Phase0 = #{name => Name},
-                                Phase1 = maybe_add(
-                                    Phase0, duration, PhaseProps, ~"duration", fun to_integer/1
-                                ),
-                                Phase2 = maybe_add(
-                                    Phase1, start, PhaseProps, ~"start", fun decode_phase_start/1
-                                ),
-                                Phase3 = maybe_add(
-                                    Phase2, config, PhaseProps, ~"config", fun deep_decode/1
-                                ),
-                                {true, Phase3}
-                        end;
-                    (_) ->
-                        false
-                end,
-                Decoded
-            );
-        Other ->
-            %% Lua phases() returned a non-list — likely a script bug. Logging the
-            %% type helps the developer notice it; without this, decode silently
-            %% returned [], match_server treated it as "no phases", and the
-            %% mismatch only surfaced as runtime weirdness much later.
-            ?LOG_WARNING(#{
-                msg => ~"asobi_lua_match: phases() returned non-list, ignoring",
-                got_type => type_of(Other)
-            }),
-            []
-    end.
-
-type_of(V) when is_list(V) -> ~"list";
-type_of(V) when is_map(V) -> ~"map";
-type_of(V) when is_binary(V) -> ~"binary";
-type_of(V) when is_integer(V) -> ~"integer";
-type_of(V) when is_float(V) -> ~"float";
-type_of(V) when is_atom(V) -> ~"atom";
-type_of(V) when is_tuple(V) -> ~"tuple";
-type_of(_) -> ~"unknown".
-
-decode_phase_start(~"prev_ended") ->
-    prev_ended;
-decode_phase_start(~"all_ready") ->
-    all_ready;
-decode_phase_start(V) when is_number(V) -> {timer, trunc(V)};
-decode_phase_start(Props) when is_list(Props) ->
-    case proplists:get_value(~"players", Props) of
-        N when is_number(N) -> {players, trunc(N)};
-        _ ->
-            case proplists:get_value(~"timer", Props) of
-                N when is_number(N) -> {timer, trunc(N)};
-                _ -> prev_ended
-            end
-    end;
-decode_phase_start(_) ->
-    prev_ended.
-
-maybe_add(Map, Key, Props, LuaKey, DecodeFn) ->
-    case proplists:get_value(LuaKey, Props) of
-        undefined -> Map;
-        nil -> Map;
-        Val -> Map#{Key => DecodeFn(Val)}
-    end.
-
-to_integer(N) when is_number(N) -> trunc(N);
-to_integer(_) -> 0.
+    asobi_lua_phases:decode_phases(PhasesRef, LuaSt).

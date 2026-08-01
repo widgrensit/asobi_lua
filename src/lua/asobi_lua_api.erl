@@ -84,7 +84,26 @@ their value directly.
 -export([atomize_entities/1]).
 
 -spec install(map(), dynamic()) -> dynamic().
+install(#{probe := true} = Ctx, St0) ->
+    %% A probe VM exists only to ask the script a question (e.g. does it
+    %% define phases()) by re-running the whole file body - see
+    %% asobi_lua_match:boot_throwaway_lua_state/2 and
+    %% asobi_lua_world:boot_throwaway_lua_state/2. Re-running the file body
+    %% must not re-fire economy/leaderboard/notify/storage/chat/broadcast
+    %% side effects a second time, so every effectful function is stubbed
+    %% out here. Read-only/query functions (balance, top/rank/around,
+    %% get/player_get, spatial.*) run for real - calling them twice is safe.
+    install_pure(Ctx, St0);
 install(Ctx, St0) ->
+    St1 = create_tables(St0),
+    install_fns(api_fns(Ctx, live), St1).
+
+-spec install_pure(map(), dynamic()) -> dynamic().
+install_pure(Ctx, St0) ->
+    St1 = create_tables(St0),
+    install_fns(api_fns(Ctx, probe), St1).
+
+create_tables(St0) ->
     %% Pre-create namespace tables
     St1 = create_table([~"game"], St0),
     St2 = create_table([~"game", ~"economy"], St1),
@@ -93,33 +112,50 @@ install(Ctx, St0) ->
     St5a = create_table([~"game", ~"chat"], St4),
     St5b = create_table([~"game", ~"spatial"], St5a),
     St5c = create_table([~"game", ~"zone"], St5b),
-    St5 = create_table([~"game", ~"terrain"], St5c),
-    Fns = [
+    create_table([~"game", ~"terrain"], St5c).
+
+%% Builds the {LuaPath, Fun} table install/2 and install_pure/2 both wire up.
+%% `zone.*`/`terrain.*` are omitted from the probe/live distinction below:
+%% they already gate on `zone_pid`/`terrain_store_pid` being present in Ctx
+%% (see fun_zone_spawn/1, fun_terrain_get_chunk/1 etc.), and a probe VM's Ctx
+%% never carries those keys, so they are already inert in probe mode without
+%% help from `pick/3`.
+api_fns(Ctx, Mode) ->
+    [
         %% Core
         {[~"game", ~"id"], fun_id()},
         {[~"game", ~"log"], fun_log(Ctx)},
-        {[~"game", ~"broadcast"], fun_broadcast(Ctx)},
-        {[~"game", ~"send"], fun_send()},
+        {[~"game", ~"broadcast"], pick(Mode, ~"game.broadcast", fun_broadcast(Ctx))},
+        {[~"game", ~"send"], pick(Mode, ~"game.send", fun_send())},
         %% Economy
-        {[~"game", ~"economy", ~"grant"], fun_economy_grant()},
-        {[~"game", ~"economy", ~"debit"], fun_economy_debit()},
+        {[~"game", ~"economy", ~"grant"], pick(Mode, ~"game.economy.grant", fun_economy_grant())},
+        {[~"game", ~"economy", ~"debit"], pick(Mode, ~"game.economy.debit", fun_economy_debit())},
         {[~"game", ~"economy", ~"balance"], fun_economy_balance()},
-        {[~"game", ~"economy", ~"purchase"], fun_economy_purchase()},
+        {
+            [~"game", ~"economy", ~"purchase"],
+            pick(Mode, ~"game.economy.purchase", fun_economy_purchase())
+        },
         %% Leaderboard
-        {[~"game", ~"leaderboard", ~"submit"], fun_lb_submit()},
+        {
+            [~"game", ~"leaderboard", ~"submit"],
+            pick(Mode, ~"game.leaderboard.submit", fun_lb_submit())
+        },
         {[~"game", ~"leaderboard", ~"top"], fun_lb_top()},
         {[~"game", ~"leaderboard", ~"rank"], fun_lb_rank()},
         {[~"game", ~"leaderboard", ~"around"], fun_lb_around()},
         %% Notifications
-        {[~"game", ~"notify"], fun_notify()},
-        {[~"game", ~"notify_many"], fun_notify_many()},
+        {[~"game", ~"notify"], pick(Mode, ~"game.notify", fun_notify())},
+        {[~"game", ~"notify_many"], pick(Mode, ~"game.notify_many", fun_notify_many())},
         %% Storage
         {[~"game", ~"storage", ~"get"], fun_storage_get()},
-        {[~"game", ~"storage", ~"set"], fun_storage_set()},
+        {[~"game", ~"storage", ~"set"], pick(Mode, ~"game.storage.set", fun_storage_set())},
         {[~"game", ~"storage", ~"player_get"], fun_storage_player_get()},
-        {[~"game", ~"storage", ~"player_set"], fun_storage_player_set()},
+        {
+            [~"game", ~"storage", ~"player_set"],
+            pick(Mode, ~"game.storage.player_set", fun_storage_player_set())
+        },
         %% Chat
-        {[~"game", ~"chat", ~"send"], fun_chat_send()},
+        {[~"game", ~"chat", ~"send"], pick(Mode, ~"game.chat.send", fun_chat_send())},
         %% Spatial
         {[~"game", ~"spatial", ~"query_radius"], fun_spatial_query_radius(Ctx)},
         {[~"game", ~"spatial", ~"query_rect"], fun_spatial_query_rect(Ctx)},
@@ -132,14 +168,31 @@ install(Ctx, St0) ->
         %% Terrain
         {[~"game", ~"terrain", ~"get_chunk"], fun_terrain_get_chunk(Ctx)},
         {[~"game", ~"terrain", ~"preload"], fun_terrain_preload(Ctx)}
-    ],
+    ].
+
+%% Selects the real function in live mode; in probe mode, swaps anything that
+%% mutates persistent state, broadcasts an event, or grants/deducts a
+%% resource for `inert/1`, so re-running a script's top-level body a second
+%% time (to ask it a question like "do you define phases()?") cannot re-fire
+%% that side effect.
+pick(live, _Name, RealFn) -> RealFn;
+pick(probe, Name, _RealFn) -> inert(Name).
+
+%% See asobi_lua_match.erl / asobi_lua_world.erl `boot_throwaway_lua_state/2`.
+inert(Name) ->
+    fun(_Args, St) ->
+        ?LOG_DEBUG(#{msg => ~"asobi_lua: effectful api suppressed in probe vm", fn => Name}),
+        {[false], St}
+    end.
+
+install_fns(Fns, St0) ->
     lists:foldl(
         fun({Path, Fn}, St) ->
             {Enc, StA} = luerl:encode(Fn, St),
             {ok, StB} = luerl:set_table_keys(Path, Enc, StA),
             StB
         end,
-        St5,
+        St0,
         Fns
     ).
 
