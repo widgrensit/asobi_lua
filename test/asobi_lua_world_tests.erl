@@ -401,6 +401,46 @@ phases_from_raw_config_test() ->
         file:delete(Path)
     end.
 
+%% Security review on widgrensit/asobi_lua#109/#117: every raw-config clause
+%% above (spawn_templates/1, terrain_provider/1, phases/1, generate_world/2)
+%% boots a throwaway Lua VM via boot_throwaway_lua_state/2, which means the
+%% script's whole top-level body runs again. Before the `probe => true` /
+%% install_pure fix, a top-level `game.economy.grant` call fired once per
+%% throwaway boot - so asking phases/1 twice would grant twice, with no
+%% idempotency key on that primitive. This pins that a probe boot never
+%% reaches asobi_economy at all, no matter how many times it is asked.
+probe_vm_suppresses_top_level_side_effects_test() ->
+    meck:new(asobi_economy, [no_link]),
+    meck:expect(asobi_economy, grant, fun(_, _, _, _) -> {ok, #{}} end),
+    Path = world_temp_script(
+        ~"""
+        match_size = 1
+        max_players = 1
+        game_type = "world"
+        game.economy.grant('p1', 'gold', 100, 'signup')
+        function init(_) return {} end
+        function spawn_position(_, _) return { x = 0, y = 0 } end
+        function generate_world(_, _) return { ['0,0'] = {} } end
+        function zone_tick(e, z) return e, z end
+        function handle_input(_, _, e) return e end
+        function post_tick(_, s) return s end
+        function phases(_)
+            return { { name = 'lobby', duration = 5000 } }
+        end
+        """
+    ),
+    try
+        GameConfig = #{lua_script => Path, match_id => ~"world_probe_dedupe"},
+        Phases1 = asobi_lua_world:phases(GameConfig),
+        Phases2 = asobi_lua_world:phases(GameConfig),
+        ?assertEqual(1, length(Phases1)),
+        ?assertEqual(1, length(Phases2)),
+        ?assertEqual(0, meck:num_calls(asobi_economy, grant, '_'))
+    after
+        file:delete(Path),
+        meck:unload(asobi_economy)
+    end.
+
 on_phase_started_threads_state_test() ->
     Path = world_temp_script(
         ~"""

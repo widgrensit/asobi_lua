@@ -693,77 +693,7 @@ decode_zone_states_acc([_ | Rest], Acc) ->
     decode_zone_states_acc(Rest, Acc).
 
 decode_phases(PhasesRef, LuaSt) ->
-    case luerl:decode(PhasesRef, LuaSt) of
-        Decoded when is_list(Decoded) ->
-            lists:filtermap(
-                fun
-                    ({_, PhaseProps}) when is_list(PhaseProps) ->
-                        Name = proplists:get_value(~"name", PhaseProps),
-                        case Name of
-                            undefined ->
-                                false;
-                            _ ->
-                                Phase0 = #{name => Name},
-                                Phase1 = maybe_add(
-                                    Phase0, duration, PhaseProps, ~"duration", fun to_integer/1
-                                ),
-                                Phase2 = maybe_add(
-                                    Phase1, start, PhaseProps, ~"start", fun decode_phase_start/1
-                                ),
-                                Phase3 = maybe_add(
-                                    Phase2, config, PhaseProps, ~"config", fun deep_decode/1
-                                ),
-                                {true, Phase3}
-                        end;
-                    (_) ->
-                        false
-                end,
-                Decoded
-            );
-        Other ->
-            %% Lua phases() returned a non-list — likely a script bug. Logging the
-            %% type helps the developer notice it; without this, decode silently
-            %% returned [], the world server treated it as "no phases", and the
-            %% mismatch only surfaced as runtime weirdness much later.
-            ?LOG_WARNING(#{
-                msg => ~"asobi_lua_world: phases() returned non-list, ignoring",
-                got_type => type_of(Other)
-            }),
-            []
-    end.
-
-type_of(V) when is_list(V) -> ~"list";
-type_of(V) when is_map(V) -> ~"map";
-type_of(V) when is_binary(V) -> ~"binary";
-type_of(V) when is_integer(V) -> ~"integer";
-type_of(V) when is_float(V) -> ~"float";
-type_of(V) when is_atom(V) -> ~"atom";
-type_of(V) when is_tuple(V) -> ~"tuple";
-type_of(_) -> ~"unknown".
-
-decode_phase_start(~"prev_ended") ->
-    prev_ended;
-decode_phase_start(~"all_ready") ->
-    all_ready;
-decode_phase_start(V) when is_number(V) -> {timer, trunc(V)};
-decode_phase_start(Props) when is_list(Props) ->
-    case proplists:get_value(~"players", Props) of
-        N when is_number(N) -> {players, trunc(N)};
-        _ ->
-            case proplists:get_value(~"timer", Props) of
-                N when is_number(N) -> {timer, trunc(N)};
-                _ -> prev_ended
-            end
-    end;
-decode_phase_start(_) ->
-    prev_ended.
-
-maybe_add(Map, Key, Props, LuaKey, DecodeFn) ->
-    case proplists:get_value(LuaKey, Props) of
-        undefined -> Map;
-        nil -> Map;
-        Val -> Map#{Key => DecodeFn(Val)}
-    end.
+    asobi_lua_phases:decode_phases(PhasesRef, LuaSt).
 
 parse_coords(Bin) ->
     case binary:split(Bin, ~",") of
@@ -788,8 +718,8 @@ deep_decode(Term) ->
 to_number(N) when is_number(N) -> N;
 to_number(_) -> 0.0.
 
-to_integer(N) when is_number(N) -> trunc(N);
-to_integer(_) -> 0.
+to_integer(N) ->
+    asobi_lua_phases:to_integer(N).
 
 decode_spawn_templates(TemplatesRef, LuaSt) ->
     case luerl:decode(TemplatesRef, LuaSt) of
@@ -954,23 +884,32 @@ make_ctx(Config) ->
         script => maps:get(lua_script, GameConfig, undefined)
     }.
 
-%% Init-time callbacks (spawn_templates/1, terrain_provider/1, phases/1) are
-%% invoked by asobi_world_server with the raw world config - no lua_state
-%% threaded through, since GameMod:init/1 hasn't run yet (mirrors
-%% generate_world/2's raw-config clause). Boot a throwaway luerl state just to
-%% ask the script the one question, then let it get GC'd.
+%% Init-time callbacks (spawn_templates/1, terrain_provider/1, phases/1,
+%% generate_world/2) are invoked by asobi_world_server with the raw world
+%% config - no lua_state threaded through, since GameMod:init/1 hasn't run yet
+%% (mirrors generate_world/2's raw-config clause). Boot a throwaway luerl
+%% state just to ask the script the one question, then let it get GC'd.
 %% Boots the VM at ?GENERATE_TIMEOUT (not ?INIT_TIMEOUT) - init_zone_state/2
 %% and generate_world/2 already load this same file at that budget, and a
 %% script large enough to matter shouldn't load fine for one caller and time
 %% out for another. Returns a ready-to-delegate state map (script alongside
 %% lua_state) so the caller's #{lua_state := _} clause can log a real script
 %% path instead of <unknown> if the subsequent Lua call itself fails.
+%%
+%% Installs with a `probe => true` Ctx (kept separate from the plain `Ctx`
+%% used for logging/make_ctx, which init/1's real VM boot also builds via
+%% make_ctx/1) so asobi_lua_api:install/2 stubs out every effectful game.*
+%% function - booting this VM re-runs the script's whole top-level body, and
+%% without the marker a top-level side-effecting call would fire a second
+%% time per throwaway boot (see security review on widgrensit/asobi_lua#109
+%% / #117).
 -spec boot_throwaway_lua_state(map(), atom()) -> {ok, map()} | {error, term()}.
 boot_throwaway_lua_state(Config, Caller) ->
     Ctx = make_ctx(Config),
     case maps:get(script, Ctx, undefined) of
         ScriptPath when is_binary(ScriptPath); is_list(ScriptPath) ->
-            PreInstall = fun(St) -> asobi_lua_api:install(Ctx, St) end,
+            ProbeCtx = Ctx#{probe => true},
+            PreInstall = fun(St) -> asobi_lua_api:install(ProbeCtx, St) end,
             case asobi_lua_loader:new(ScriptPath, ?GENERATE_TIMEOUT, PreInstall) of
                 {ok, LuaSt} ->
                     {ok, #{lua_state => LuaSt, script => ScriptPath}};

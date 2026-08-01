@@ -30,6 +30,9 @@ function get_state(player_id, state)  -- return state visible to player
 -- Optional:
 function vote_requested(state)        -- return vote config or nil
 function vote_resolved(template, result, state) -- return updated state
+function phases(config)                      -- return list of phase definitions
+function on_phase_started(phase_name, state) -- return updated state
+function on_phase_ended(phase_name, state)   -- return updated state
 ```
 """.
 
@@ -39,6 +42,7 @@ function vote_resolved(template, result, state) -- return updated state
 
 -export([init/1, join/2, join/3, leave/2, handle_input/3, tick/1, get_state/2]).
 -export([vote_requested/1, vote_resolved/3]).
+-export([phases/1, on_phase_started/2, on_phase_ended/2]).
 
 %% A sandboxed Lua callback runs in a child process so the parent
 %% gen_server stays responsive. These wall-clock budgets cap how long a
@@ -51,6 +55,7 @@ function vote_resolved(template, result, state) -- return updated state
 -define(LEAVE_TIMEOUT, 200).
 -define(GET_STATE_TIMEOUT, 100).
 -define(VOTE_TIMEOUT, 200).
+-define(PHASE_TIMEOUT, 200).
 
 -spec init(map()) -> {ok, map()}.
 init(Config) ->
@@ -217,6 +222,68 @@ vote_resolved(Template, Result, #{lua_state := LuaSt, game_state := GS} = State)
             {ok, State}
     end.
 
+%% --- Phase callbacks ---
+%%
+%% widgrensit/asobi_lua#109: asobi_match_server:init/1 gates on
+%% `erlang:function_exported(GameMod, phases, 1)` before calling
+%% `GameMod:phases(GameConfig)` - same pattern asobi_world_server uses. This
+%% module simply never exported phases/1 (or the on_phase_* hooks), so
+%% function_exported was always false and phases were silently unreachable
+%% from every Lua match script, despite asobi_match:phases/1 documenting
+%% support for "Erlang match games and Lua world games" alike.
+
+-spec phases(map()) -> [map()].
+phases(#{lua_state := LuaSt} = State) ->
+    %% Optional callback - asobi_lua_loader:call/4 cannot tell "never defined"
+    %% apart from "defined and raised", both surface as {error, {lua_error, _}}
+    %% - so probe first. Only a script that DOES define it and then fails gets
+    %% logged. Mirrors asobi_lua_world:phases/1's is_defined guard.
+    case asobi_lua_loader:is_defined(phases, LuaSt) of
+        false ->
+            [];
+        true ->
+            case asobi_lua_loader:call(phases, [#{}], LuaSt, ?INIT_TIMEOUT) of
+                {ok, [PhasesRef | _], LuaSt1} ->
+                    decode_phases(PhasesRef, LuaSt1);
+                {error, Reason} ->
+                    log_match_lua_error(warning, phases, Reason, State),
+                    []
+            end
+    end;
+phases(Config) when is_map(Config) ->
+    %% Called by asobi_match_server:init/1 with GameConfig directly - the same
+    %% map GameMod:init/1 itself receives (asobi_match_server passes the
+    %% identical `GameConfig0#{match_id => MatchId}` map to both calls), so
+    %% lua_script lives at this map's top level and no lua_state has been
+    %% threaded through yet. Mirrors asobi_lua_world:phases/1's raw-config
+    %% clause.
+    case boot_throwaway_lua_state(Config, phases) of
+        {ok, DelegateState} -> phases(DelegateState);
+        {error, _} -> []
+    end.
+%% No catch-all `phases(_) -> []` clause: the -spec restricts the domain to
+%% map(), and the two clauses above already cover every map (the first
+%% matches any map carrying lua_state, the second - `is_map(Config)` -
+%% catches every other map), so a third clause would be unreachable dead code.
+
+-spec on_phase_started(binary(), map()) -> {ok, map()}.
+on_phase_started(PhaseName, #{lua_state := LuaSt, game_state := GS} = State) ->
+    case asobi_lua_loader:call(on_phase_started, [PhaseName, GS], LuaSt, ?PHASE_TIMEOUT) of
+        {ok, [GS1 | _], LuaSt1} ->
+            {ok, State#{lua_state => LuaSt1, game_state => GS1}};
+        {error, _} ->
+            {ok, State}
+    end.
+
+-spec on_phase_ended(binary(), map()) -> {ok, map()}.
+on_phase_ended(PhaseName, #{lua_state := LuaSt, game_state := GS} = State) ->
+    case asobi_lua_loader:call(on_phase_ended, [PhaseName, GS], LuaSt, ?PHASE_TIMEOUT) of
+        {ok, [GS1 | _], LuaSt1} ->
+            {ok, State#{lua_state => LuaSt1, game_state => GS1}};
+        {error, _} ->
+            {ok, State}
+    end.
+
 %% --- Internal ---
 
 %% asobi#252: a script failing on every tick (or every join/leave/input)
@@ -272,3 +339,42 @@ is_finished(GS, LuaSt) ->
 
 decode_to_map(Term, LuaSt) ->
     asobi_lua_api:decode_to_map(Term, LuaSt).
+
+%% phases/1 (the raw-config clause) is invoked by asobi_match_server:init/1
+%% before the match's own lua_state exists - GameMod:init/1 has already run
+%% by then, but its result was never threaded through to this call, only the
+%% original GameConfig. Boot a throwaway VM just to ask the script the one
+%% question, then let it get GC'd. Mirrors asobi_lua_world's
+%% boot_throwaway_lua_state/2.
+%%
+%% `probe => true` in Ctx tells asobi_lua_api:install/2 to stub out every
+%% effectful game.* function (economy/leaderboard/notify/storage/chat/
+%% broadcast) - booting this VM re-runs the script's whole top-level body,
+%% and without this marker any top-level side-effecting call would fire a
+%% second time per match creation (see security review on #109/#117).
+-spec boot_throwaway_lua_state(map(), atom()) -> {ok, map()} | {error, term()}.
+boot_throwaway_lua_state(Config, Caller) ->
+    case maps:get(lua_script, Config, undefined) of
+        ScriptPath when is_binary(ScriptPath); is_list(ScriptPath) ->
+            Ctx = #{
+                match_id => maps:get(match_id, Config, undefined),
+                match_pid => self(),
+                script => ScriptPath,
+                probe => true
+            },
+            PreInstall = fun(St) -> asobi_lua_api:install(Ctx, St) end,
+            case asobi_lua_loader:new(ScriptPath, ?INIT_TIMEOUT, PreInstall) of
+                {ok, LuaSt} ->
+                    {ok, #{lua_state => LuaSt, script => ScriptPath}};
+                {error, Reason} ->
+                    log_match_lua_error(warning, Caller, Reason, #{script => ScriptPath}),
+                    {error, Reason}
+            end;
+        _ ->
+            {error, missing_lua_script}
+    end.
+
+%% --- Phase decoding ---
+
+decode_phases(PhasesRef, LuaSt) ->
+    asobi_lua_phases:decode_phases(PhasesRef, LuaSt).

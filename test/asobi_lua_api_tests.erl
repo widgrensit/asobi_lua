@@ -70,7 +70,20 @@ api_test_() ->
         {"to_storage_value preserves nested structures", fun to_storage_value_nested/0},
         {"player_set forwards a scalar number", fun storage_player_set_scalar/0},
         {"player_set forwards a binary", fun storage_player_set_binary/0},
-        {"player_set forwards an array", fun storage_player_set_array/0}
+        {"player_set forwards an array", fun storage_player_set_array/0},
+        {"probe ctx: game.economy.grant is inert", fun probe_economy_grant_inert/0},
+        {"probe ctx: game.economy.debit is inert", fun probe_economy_debit_inert/0},
+        {"probe ctx: game.economy.purchase is inert", fun probe_economy_purchase_inert/0},
+        {"probe ctx: game.economy.balance still runs for real", fun probe_economy_balance_live/0},
+        {"probe ctx: game.broadcast is inert", fun probe_broadcast_inert/0},
+        {"probe ctx: game.send is inert", fun probe_send_inert/0},
+        {"probe ctx: game.leaderboard.submit is inert", fun probe_lb_submit_inert/0},
+        {"probe ctx: game.leaderboard.top still runs for real", fun probe_lb_top_live/0},
+        {"probe ctx: game.notify is inert", fun probe_notify_inert/0},
+        {"probe ctx: game.notify_many is inert", fun probe_notify_many_inert/0},
+        {"probe ctx: game.storage.set is inert", fun probe_storage_set_inert/0},
+        {"probe ctx: game.storage.get still runs for real", fun probe_storage_get_live/0},
+        {"probe ctx: game.chat.send is inert", fun probe_chat_send_inert/0}
     ]}.
 
 setup() ->
@@ -552,7 +565,103 @@ changeset_param(CS, Field) when is_tuple(CS) ->
     Params = element(5, CS),
     maps:get(Field, Params).
 
+%% --- Probe ctx: effectful functions must be inert (widgrensit/asobi_lua#109/#117) ---
+%%
+%% A probe VM (Ctx carrying `probe => true`) exists only to ask a script a
+%% question by re-running its whole top-level body - see
+%% asobi_lua_match:boot_throwaway_lua_state/2 and
+%% asobi_lua_world:boot_throwaway_lua_state/2. Every game.* function that
+%% mutates persistent state, broadcasts an event, or grants/deducts a
+%% resource must therefore be stubbed out (install_pure/2 + inert/1) instead
+%% of hitting the real engine a second time. Read-only/query functions still
+%% run for real - calling them twice is safe.
+
+probe_economy_grant_inert() ->
+    St = install_api_probe(),
+    Code = "return game.economy.grant('p1', 'gold', 100, 'reward')",
+    {ok, [false | _], _} = eval(Code, St),
+    ?assertNot(meck:called(asobi_economy, grant, '_')).
+
+probe_economy_debit_inert() ->
+    St = install_api_probe(),
+    Code = "return game.economy.debit('p1', 'gold', 50, 'cost')",
+    {ok, [false | _], _} = eval(Code, St),
+    ?assertNot(meck:called(asobi_economy, debit, '_')).
+
+probe_economy_purchase_inert() ->
+    St = install_api_probe(),
+    Code = "return game.economy.purchase('p1', 'sword')",
+    {ok, [false | _], _} = eval(Code, St),
+    ?assertNot(meck:called(asobi_economy, purchase, '_')).
+
+probe_economy_balance_live() ->
+    St = install_api_probe(),
+    Code = "local r = game.economy.balance('p1')\nreturn r.ok ~= nil",
+    {ok, [true | _], _} = eval(Code, St),
+    ?assert(meck:called(asobi_economy, get_wallets, [~"p1"])).
+
+probe_broadcast_inert() ->
+    St = install_api_probe(),
+    Code = "return game.broadcast('hello', { msg = 'world' })",
+    {ok, [false | _], _} = eval(Code, St),
+    ?assertNot(meck:called(asobi_match_server, broadcast_event, '_')).
+
+probe_send_inert() ->
+    St = install_api_probe(),
+    Code = "return game.send('p1', { kind = 'hello' })",
+    {ok, [false | _], _} = eval(Code, St),
+    ?assertNot(meck:called(asobi_presence, send, '_')).
+
+probe_lb_submit_inert() ->
+    St = install_api_probe(),
+    Code = "return game.leaderboard.submit('kills', 'p1', 42)",
+    {ok, [false | _], _} = eval(Code, St),
+    ?assertNot(meck:called(asobi_leaderboard_server, submit, '_')).
+
+probe_lb_top_live() ->
+    St = install_api_probe(),
+    Code = "local r = game.leaderboard.top('kills', 10)\nreturn #r.ok",
+    {ok, [Count | _], _} = eval(Code, St),
+    ?assertEqual(2, trunc(Count)),
+    ?assert(meck:called(asobi_leaderboard_server, top, [~"kills", 10])).
+
+probe_notify_inert() ->
+    St = install_api_probe(),
+    Code = "return game.notify('p1', 'reward', 'You won!')",
+    {ok, [false | _], _} = eval(Code, St),
+    ?assertNot(meck:called(asobi_notify, send, '_')).
+
+probe_notify_many_inert() ->
+    St = install_api_probe(),
+    Code = "return game.notify_many({'p1','p2'}, 'reward', 'gg')",
+    {ok, [false | _], _} = eval(Code, St),
+    ?assertNot(meck:called(asobi_notify, send_many, '_')).
+
+probe_storage_set_inert() ->
+    St = install_api_probe(),
+    Code = "return game.storage.set('settings', 'theme', { value = 'dark' })",
+    {ok, [false | _], _} = eval(Code, St),
+    ?assertNot(meck:called(asobi_repo, insert, '_')),
+    ?assertNot(meck:called(asobi_repo, update_all, '_')).
+
+probe_storage_get_live() ->
+    St = install_api_probe(),
+    Code = "local r = game.storage.get('settings', 'theme')\nreturn r.error ~= nil",
+    {ok, [true | _], _} = eval(Code, St),
+    ?assert(meck:called(asobi_repo, all, '_')).
+
+probe_chat_send_inert() ->
+    St = install_api_probe(),
+    Code = "return game.chat.send('match_123', 'p1', 'gg')",
+    {ok, [false | _], _} = eval(Code, St),
+    ?assertNot(meck:called(asobi_chat_channel, send_message, '_')).
+
 %% --- Helpers ---
+
+install_api_probe() ->
+    {ok, St0} = asobi_lua_loader:new(fixture("test_match.lua")),
+    Ctx = #{match_id => ~"test-match", match_pid => self(), probe => true},
+    asobi_lua_api:install(Ctx, St0).
 
 install_api() ->
     {ok, St0} = asobi_lua_loader:new(fixture("test_match.lua")),
