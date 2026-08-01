@@ -1,12 +1,21 @@
 name: Bump asobi pin
 
-# Weekly: move the git-pinned asobi dependency in rebar.lock to the current
+# Nightly: move the git-pinned asobi dependency in rebar.lock to the current
 # main HEAD and open a PR if it changed. Closes the pin-drift gap where an
 # upstream fix never reaches this repo because the locked ref is frozen.
+# Was weekly; widgrensit/asobi_lua#103 found that cadence let a fix sit
+# unpublished for up to a week with no warning (see docker-publish.yml for
+# the accompanying staleness gate).
+#
+# Fastest fix (#103 option 1, not implemented here): a repository_dispatch
+# from widgrensit/asobi's own release workflow that triggers this workflow
+# immediately on every asobi release, instead of waiting for the next
+# scheduled run. That needs a dispatch step added to asobi's CI - a change
+# to a different repo, out of scope for a PR here.
 
 on:
   schedule:
-    - cron: '30 4 * * 1'
+    - cron: '30 4 * * *'
   workflow_dispatch:
 
 permissions:

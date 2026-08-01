@@ -1,5 +1,17 @@
 name: Docker publish
 
+# Staleness gate (widgrensit/asobi_lua#103): the locked `asobi` ref in
+# rebar.lock can lag an already-fixed-upstream asobi release for up to a
+# week, because bump-asobi-pin only runs on a schedule. This workflow fails
+# loudly if the locked ref is behind the latest asobi release rather than
+# silently publishing a stale image.
+#
+# Follow-up out of scope for this repo: #103 also proposes a
+# repository_dispatch from asobi's own release workflow to trigger
+# bump-asobi-pin.yml immediately on every asobi release (the fastest fix).
+# That requires adding a dispatch step to widgrensit/asobi's CI, which is a
+# change to a different repo and needs its own PR there.
+
 on:
   push:
     branches: [main]
@@ -20,6 +32,44 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Fail if the locked asobi pin is behind the latest asobi release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          locked_ref=$(grep -A2 '<<"asobi">>' rebar.lock | grep -oE '[0-9a-f]{40}' | head -1)
+          if [ -z "$locked_ref" ]; then
+            echo "::error::could not extract the locked asobi ref from rebar.lock"
+            exit 1
+          fi
+
+          latest_tag=$(gh api repos/widgrensit/asobi/releases/latest --jq '.tag_name')
+          latest_sha=$(gh api "repos/widgrensit/asobi/commits/${latest_tag}" --jq '.sha')
+
+          echo "locked asobi ref:     $locked_ref"
+          echo "latest asobi release: $latest_tag ($latest_sha)"
+
+          if [ "$locked_ref" = "$latest_sha" ]; then
+            echo "asobi pin matches the latest release; not stale."
+            exit 0
+          fi
+
+          status=$(gh api "repos/widgrensit/asobi/compare/${locked_ref}...${latest_sha}" --jq '.status')
+          case "$status" in
+            behind)
+              echo "locked ref already contains commits not yet in a tagged release; not stale."
+              ;;
+            ahead|diverged)
+              echo "::error::asobi pin is stale - rebar.lock pins ${locked_ref}, but the latest asobi release ${latest_tag} (${latest_sha}) is '${status}' relative to it. Run the bump-asobi-pin workflow (or 'rebar3 upgrade asobi'), merge the pin bump, and re-run this publish."
+              exit 1
+              ;;
+            *)
+              echo "::error::unexpected git compare status '${status}' between ${locked_ref} and ${latest_sha}; treating as stale out of caution."
+              exit 1
+              ;;
+          esac
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5 # v4.1.0
