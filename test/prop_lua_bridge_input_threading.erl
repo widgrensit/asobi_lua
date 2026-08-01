@@ -86,8 +86,9 @@ exec([{input, P, X, Y} | Rest], Zone, Entities, Expected, Primed) when is_binary
     case Primed of
         true ->
             %% Bridge contract: after a prior zone_tick, the move must land.
+            %% Entity keys are atomized (x, y) - see widgrensit/asobi#270.
             case maps:get(P, Entities1, undefined) of
-                #{~"x" := X, ~"y" := Y} ->
+                #{x := X, y := Y} ->
                     Expected1 = Expected#{P => {X, Y}},
                     exec(Rest, Zone, Entities1, Expected1, Primed);
                 Got ->

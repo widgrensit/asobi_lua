@@ -64,9 +64,15 @@ handle_input_uses_zone_state_from_proc_dict_test() ->
     ?assertMatch(#{lua_state := _}, erlang:get({asobi_lua_world, zone_state})),
 
     %% A move input should invoke Lua's handle_input and return updated entities.
+    %% Entity keys come back atomized (x, y, type - not ~"x", ~"y", ~"type"):
+    %% asobi_zone's shared tick path (find_zone_crossings, snapshot_entities,
+    %% spatial grid maintenance, ...) pattern-matches
+    %% #{type := ..., x := ..., y := ...} on every entity, and used to no-op
+    %% or crash for every Lua world since decode_to_map/2 builds straight off
+    %% Luerl's binary-keyed output. See widgrensit/asobi#270.
     Input = #{~"kind" => ~"move", ~"x" => 42, ~"y" => 7},
     {ok, Entities1} = asobi_lua_world:handle_input(~"p1", Input, #{}),
-    ?assertMatch(#{~"p1" := #{~"x" := 42, ~"y" := 7}}, Entities1),
+    ?assertMatch(#{~"p1" := #{type := ~"player", x := 42, y := 7}}, Entities1),
 
     %% Follow-up tick sees the handle_input lua_state changes (no crash).
     {_, _ZoneState2} = asobi_lua_world:zone_tick(Entities1, ZoneState1),
@@ -92,7 +98,7 @@ generate_world_empty_zone_table_still_gets_lua_state_test() ->
     {_, _} = asobi_lua_world:zone_tick(#{}, Zone),
     Input = #{~"kind" => ~"move", ~"x" => 11, ~"y" => 22},
     {ok, Entities1} = asobi_lua_world:handle_input(~"p1", Input, #{}),
-    ?assertMatch(#{~"p1" := #{~"x" := 11, ~"y" := 22}}, Entities1),
+    ?assertMatch(#{~"p1" := #{x := 11, y := 22}}, Entities1),
     erlang:erase({asobi_lua_world, zone_state}).
 
 %% --- Direct unit tests for individual world callbacks ---
@@ -615,7 +621,7 @@ hot_reload_zone_tick_picks_up_global_change_test() ->
         Zone0 = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
         erlang:erase({asobi_lua_world, zone_state}),
         {Ents0, Zone1} = asobi_lua_world:zone_tick(#{}, Zone0),
-        ?assertMatch(#{~"marker" := #{~"tag" := ~"before"}}, Ents0),
+        ?assertMatch(#{~"marker" := #{tag := ~"before"}}, Ents0),
 
         ok = file:write_file(
             Path,
@@ -635,7 +641,7 @@ hot_reload_zone_tick_picks_up_global_change_test() ->
         bump_mtime(Path),
 
         {Ents1, _Zone2} = asobi_lua_world:zone_tick(#{}, Zone1),
-        ?assertMatch(#{~"marker" := #{~"tag" := ~"after"}}, Ents1)
+        ?assertMatch(#{~"marker" := #{tag := ~"after"}}, Ents1)
     after
         erlang:erase({asobi_lua_world, zone_state}),
         file:delete(Path)
@@ -668,7 +674,7 @@ hot_reload_zone_tick_survives_syntax_error_test() ->
 
         {Ents1, _Zone2} = asobi_lua_world:zone_tick(#{}, Zone1),
         %% The old code still runs, so the marker still says "good".
-        ?assertMatch(#{~"marker" := #{~"tag" := ~"good"}}, Ents1)
+        ?assertMatch(#{~"marker" := #{tag := ~"good"}}, Ents1)
     after
         erlang:erase({asobi_lua_world, zone_state}),
         file:delete(Path)
