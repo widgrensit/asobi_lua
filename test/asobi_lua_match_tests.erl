@@ -48,7 +48,17 @@ lua_match_test_() ->
         {"vote_requested returning false yields none", fun vote_requested_false/0},
         {"vote_resolved with unknown template still returns ok",
             fun vote_resolved_unknown_template/0},
-        {"handle_input failure returns previous state", fun handle_input_failure/0}
+        {"handle_input failure returns previous state", fun handle_input_failure/0},
+        {"phases/1 and the on_phase_* hooks are exported (asobi_lua#109)",
+            fun phase_callbacks_are_exported/0},
+        {"phases returns empty when script has no phases()",
+            fun phases_returns_empty_when_undefined/0},
+        {"phases returns decoded phase definitions", fun phases_returns_decoded_phases/0},
+        {"phases logs and returns empty on a non-list return", fun phases_non_list_returns_empty/0},
+        {"phases works from the raw config asobi_match_server actually sends",
+            fun phases_from_raw_config/0},
+        {"on_phase_started threads state through the Lua VM", fun on_phase_started_threads_state/0},
+        {"on_phase_ended threads state through the Lua VM", fun on_phase_ended_threads_state/0}
     ].
 
 init_ok() ->
@@ -167,6 +177,148 @@ vote_resolved_ok() ->
     Result = #{winner => ~"opt_a"},
     {ok, State1} = asobi_lua_match:vote_resolved(~"test_vote", Result, State0),
     ?assert(is_map(State1)).
+
+%% --- Phase callback tests (widgrensit/asobi_lua#109) ---
+%%
+%% asobi_match_server gates phase support behind
+%% `erlang:function_exported(GameMod, phases, 1)` before ever calling
+%% GameMod:phases/1 - the same pattern asobi_world_server uses for Lua
+%% worlds. Before this fix asobi_lua_match never exported phases/1 (or the
+%% on_phase_* hooks), so function_exported was always false and phases were
+%% silently unreachable from every Lua match script. This first test pins
+%% the actual root cause; the rest exercise the behaviour mirroring
+%% asobi_lua_world_tests's phase coverage.
+
+phase_callbacks_are_exported() ->
+    ?assert(erlang:function_exported(asobi_lua_match, phases, 1)),
+    ?assert(erlang:function_exported(asobi_lua_match, on_phase_started, 2)),
+    ?assert(erlang:function_exported(asobi_lua_match, on_phase_ended, 2)).
+
+phases_returns_empty_when_undefined() ->
+    %% test_match.lua defines no phases() function - must return [], not crash.
+    {ok, S0} = init_match(),
+    ?assertEqual([], asobi_lua_match:phases(S0)).
+
+phases_returns_decoded_phases() ->
+    Path = temp_script(
+        ~"""
+        match_size = 1
+        function init(_) return {} end
+        function join(id, s) return s end
+        function leave(id, s) return s end
+        function handle_input(_, _, s) return s end
+        function tick(s) return s end
+        function get_state(_, s) return s end
+        function phases(_)
+            return {
+                { name = 'lobby', duration = 5000 },
+                { name = 'play',  duration = 30000, start = 'prev_ended' }
+            }
+        end
+        """
+    ),
+    try
+        {ok, S0} = asobi_lua_match:init(#{lua_script => Path}),
+        Phases = asobi_lua_match:phases(S0),
+        ?assertEqual(2, length(Phases)),
+        [Lobby, Play] = Phases,
+        ?assertEqual(~"lobby", maps:get(name, Lobby)),
+        ?assertEqual(prev_ended, maps:get(start, Play))
+    after
+        file:delete(Path)
+    end.
+
+phases_non_list_returns_empty() ->
+    %% When phases() returns garbage, the bridge logs and returns [].
+    Path = temp_script(
+        ~"""
+        match_size = 1
+        function init(_) return {} end
+        function join(id, s) return s end
+        function leave(id, s) return s end
+        function handle_input(_, _, s) return s end
+        function tick(s) return s end
+        function get_state(_, s) return s end
+        function phases(_) return 42 end
+        """
+    ),
+    try
+        {ok, S0} = asobi_lua_match:init(#{lua_script => Path}),
+        ?assertEqual([], asobi_lua_match:phases(S0))
+    after
+        file:delete(Path)
+    end.
+
+phases_from_raw_config() ->
+    %% Mirrors asobi_match_server:init/1's GameMod:phases(GameConfig) - phases/1
+    %% is called with the exact same map GameMod:init/1 already received (no
+    %% lua_state threaded through), so lua_script lives at this map's top level.
+    Path = temp_script(
+        ~"""
+        match_size = 1
+        function init(_) return {} end
+        function join(id, s) return s end
+        function leave(id, s) return s end
+        function handle_input(_, _, s) return s end
+        function tick(s) return s end
+        function get_state(_, s) return s end
+        function phases(_)
+            return { { name = 'lobby', duration = 5000 } }
+        end
+        """
+    ),
+    try
+        GameConfig = #{lua_script => Path, match_id => ~"raw_probe"},
+        Phases = asobi_lua_match:phases(GameConfig),
+        ?assertEqual(1, length(Phases)),
+        [Lobby] = Phases,
+        ?assertEqual(~"lobby", maps:get(name, Lobby))
+    after
+        file:delete(Path)
+    end.
+
+on_phase_started_threads_state() ->
+    Path = temp_script(
+        ~"""
+        match_size = 1
+        function init(_) return { phase = nil } end
+        function join(id, s) return s end
+        function leave(id, s) return s end
+        function handle_input(_, _, s) return s end
+        function tick(s) return s end
+        function get_state(_, s) return s end
+        function on_phase_started(name, s) s.phase = name; return s end
+        """
+    ),
+    try
+        {ok, S0} = asobi_lua_match:init(#{lua_script => Path}),
+        {ok, S1} = asobi_lua_match:on_phase_started(~"play", S0),
+        #{lua_state := LuaSt, game_state := GS} = S1,
+        GsMap = asobi_lua_api:decode_to_map(GS, LuaSt),
+        ?assertEqual(~"play", maps:get(~"phase", GsMap))
+    after
+        file:delete(Path)
+    end.
+
+on_phase_ended_threads_state() ->
+    Path = temp_script(
+        ~"""
+        match_size = 1
+        function init(_) return {} end
+        function join(id, s) return s end
+        function leave(id, s) return s end
+        function handle_input(_, _, s) return s end
+        function tick(s) return s end
+        function get_state(_, s) return s end
+        function on_phase_ended(_, s) return s end
+        """
+    ),
+    try
+        {ok, S0} = asobi_lua_match:init(#{lua_script => Path}),
+        ?assertMatch({ok, _}, asobi_lua_match:on_phase_ended(~"play", S0))
+    after
+        file:delete(Path)
+    end.
 
 finish_immediately() ->
     Config = #{lua_script => fixture("finish_immediately.lua")},
