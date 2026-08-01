@@ -989,6 +989,15 @@ to_bin(T) -> list_to_binary(io_lib:format("~p", [T])).
 %% expects atom keys (x). Exported so asobi_lua_world can atomize its
 %% zone_tick/handle_input results before they re-enter the shared,
 %% game-module-agnostic asobi_zone code path. See widgrensit/asobi#270.
+%%
+%% safe_to_atom/1 only atomizes a key if it already exists as an atom
+%% (binary_to_existing_atom), so this is NOT a full normalisation: a Lua
+%% script that stamps an entity with an arbitrary custom field the engine
+%% has never referenced as an atom leaves that one field's key as binary.
+%% The result is a legitimately mixed-key map. That's fine for asobi_zone's
+%% own reads (type/x/y are always atoms already, by construction), but don't
+%% read this as "entities are atom-keyed after this call" - only the fields
+%% asobi's own code already knows about are guaranteed to be.
 -spec atomize_entities(map()) -> map().
 atomize_entities(Entities) ->
     maps:map(
