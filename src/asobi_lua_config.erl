@@ -29,7 +29,7 @@ configure via `sys.config` are unaffected).
 match_size     = 4                          -- required, positive integer
 max_players    = 10                         -- optional, defaults to match_size
 strategy       = "fill"                     -- optional, "fill" | "skill_based"
-bots           = { script = "bots/ai.lua" } -- optional
+bots           = { script = "bots/ai.lua", min_players = 4 } -- optional; min_players defaults to match_size, enabled defaults to true
 game_type      = "world"                    -- optional, "match" (default) or "world"
 state_strategy = "shared"                   -- optional, "shared" picks asobi_lua_match_shared (encode-once broadcast)
 guest_auth     = true                       -- optional, offer anonymous no-account play (needs an operator pepper; ADR 0004)
@@ -63,6 +63,9 @@ Bot scripts can export a `names` list that the platform reads after loading:
 names = {"Spark", "Blitz", "Volt"}
 ```
 """.
+
+-include_lib("kernel/include/logger.hrl").
+-include("asobi_lua_bots.hrl").
 
 -export([maybe_load_game_config/0, reload_game_modes/0, apply_guest_auth/1]).
 -ifdef(TEST).
@@ -329,9 +332,11 @@ maybe_add_bots(Config, BotProps, ScriptPath) when is_list(BotProps) ->
             %% escapes the match's own directory.
             case safe_join(BaseDir, BotScript) of
                 {ok, AbsBot} ->
+                    #{match_size := MatchSize} = Config,
                     Config#{
                         bots => #{
-                            enabled => true,
+                            enabled => bots_enabled(BotProps),
+                            min_players => bots_min_players(BotProps, MatchSize),
                             script => unicode:characters_to_binary(AbsBot)
                         }
                     };
@@ -346,6 +351,33 @@ maybe_add_bots(Config, BotProps, ScriptPath) when is_list(BotProps) ->
     end;
 maybe_add_bots(Config, _, _) ->
     Config.
+
+%% `bots.enabled` defaults to true (setting a `bots` table at all is the
+%% opt-in); an explicit `enabled = false` lets a game keep the table around
+%% (e.g. to declare min_players) while turning bot-fill off.
+bots_enabled(BotProps) ->
+    proplists:get_value(~"enabled", BotProps) =/= false.
+
+%% `bots.min_players` mirrors the sys.config knob documented in
+%% guides/lua-bots.md; a Lua game defaults to match_size, same as the
+%% spawner's own fallback. Clamped at ?MAX_BOT_FILL: an unbounded value
+%% here is a DoS vector (asobi_bot_spawner:fill_mode/2 would otherwise
+%% build an equally unbounded bot-add list; see #79 follow-up).
+bots_min_players(BotProps, MatchSize) ->
+    case proplists:get_value(~"min_players", BotProps) of
+        MP when is_number(MP), MP > 0 -> clamp_bot_fill(trunc(MP));
+        _ -> clamp_bot_fill(MatchSize)
+    end.
+
+clamp_bot_fill(MP) when MP > ?MAX_BOT_FILL ->
+    ?LOG_WARNING(#{
+        msg => ~"bots.min_players exceeds ceiling, clamping",
+        requested => MP,
+        ceiling => ?MAX_BOT_FILL
+    }),
+    ?MAX_BOT_FILL;
+clamp_bot_fill(MP) ->
+    MP.
 
 %% H1 (2026-05-19): anchor a Lua-supplied relative path inside Base. Reject
 %% absolute paths, `..` segments, and anything whose `filename:absname/1`
