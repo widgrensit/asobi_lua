@@ -28,6 +28,8 @@ config_test_() ->
     {foreach, fun() -> application:set_env(asobi, game_modes, #{}) end,
         fun(_) -> application:set_env(asobi, game_modes, #{}) end, [
             {"single mode: loads match.lua globals", fun single_mode_loads_globals/0},
+            {"single mode: registers 'default' key in game_modes (load-bearing, asobi#244)",
+                fun single_mode_registers_default_key/0},
             {"single mode: minimal config (only match_size)", fun single_mode_minimal/0},
             {"single mode: missing match_size fails", fun single_mode_missing_size/0},
             {"multi mode: loads config.lua manifest", fun multi_mode_manifest/0},
@@ -79,6 +81,22 @@ single_mode_loads_globals() ->
     ?assertMatch(#{module := {lua, _}, match_size := 4, max_players := 10, strategy := fill}, Mode),
     #{bots := #{enabled := true, script := BotScript}} = Mode,
     ?assert(is_binary(BotScript)).
+
+single_mode_registers_default_key() ->
+    %% Load-bearing per asobi#244: asobi's known_mode/1 no longer
+    %% special-cases "default" — it purely checks game_modes membership.
+    %% load_single_mode/2's #{~"default" => ModeConfig} registration is
+    %% what keeps single-mode games recognised at all now. Exercised via
+    %% the real reload path (maybe_load_game_config/0 -> reload_game_modes/0
+    %% -> load_single_mode/2), asserting directly against the app-env key
+    %% asobi reads rather than the local get_game_modes/0 helper.
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), ~"match_size = 2\n"),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    {ok, Modes} = application:get_env(asobi, game_modes),
+    ?assert(is_map_key(~"default", Modes)),
+    cleanup_temp_dir(TmpDir).
 
 single_mode_minimal() ->
     TmpDir = make_temp_dir(),
