@@ -1,5 +1,6 @@
 -module(asobi_lua_config_tests).
 -include_lib("eunit/include/eunit.hrl").
+-include("asobi_lua_bots.hrl").
 
 -spec fixture(string()) -> file:filename_all().
 fixture(Name) ->
@@ -63,6 +64,8 @@ config_test_() ->
                 fun bot_config_min_players_defaults_to_match_size/0},
             {"bot_config enabled = false overrides the default true",
                 fun bot_config_enabled_false_override/0},
+            {"bot_config min_players far exceeding the ceiling is clamped, not rejected",
+                fun bot_config_min_players_clamped_at_ceiling/0},
             {"world dimension globals (tick_rate/grid_size/zone_size/view_radius/persistent)",
                 fun world_dimension_globals_forwarded/0},
             {"guest_auth = true global enables the asobi guest_auth flag",
@@ -481,6 +484,32 @@ bot_config_enabled_false_override() ->
     Mode = maps:get(~"default", get_game_modes()),
     Bots = maps:get(bots, Mode),
     ?assertEqual(false, maps:get(enabled, Bots)),
+    cleanup_temp_dir(TmpDir).
+
+bot_config_min_players_clamped_at_ceiling() ->
+    %% #79 follow-up (HIGH severity DoS, security review): a config
+    %% declaring min_players in the millions (paired with an equally large
+    %% max_players, so the spawner's own cap doesn't save us) must clamp to
+    %% ?MAX_BOT_FILL at load time, not load unbounded and not fail the
+    %% whole config load.
+    TmpDir = make_temp_dir(),
+    ok = filelib:ensure_dir(filename:join([TmpDir, "bots", "x"])),
+    {ok, Chaser} = file:read_file(fixture("bots/chaser.lua")),
+    ok = file:write_file(filename:join([TmpDir, "bots", "chaser.lua"]), Chaser),
+    ok = file:write_file(
+        filename:join(TmpDir, "match.lua"),
+        ~"""
+        match_size = 2
+        max_players = 5000000
+        bots = { script = 'bots/chaser.lua', min_players = 5000000 }
+        """
+    ),
+    application:set_env(asobi, game_dir, TmpDir),
+    ?assertEqual(ok, asobi_lua_config:maybe_load_game_config()),
+    Mode = maps:get(~"default", get_game_modes()),
+    Bots = maps:get(bots, Mode),
+    ?assertEqual(true, maps:get(enabled, Bots)),
+    ?assertEqual(?MAX_BOT_FILL, maps:get(min_players, Bots)),
     cleanup_temp_dir(TmpDir).
 
 world_dimension_globals_forwarded() ->

@@ -64,6 +64,9 @@ names = {"Spark", "Blitz", "Volt"}
 ```
 """.
 
+-include_lib("kernel/include/logger.hrl").
+-include("asobi_lua_bots.hrl").
+
 -export([maybe_load_game_config/0, reload_game_modes/0, apply_guest_auth/1]).
 -ifdef(TEST).
 -export([safe_join/2]).
@@ -357,12 +360,24 @@ bots_enabled(BotProps) ->
 
 %% `bots.min_players` mirrors the sys.config knob documented in
 %% guides/lua-bots.md; a Lua game defaults to match_size, same as the
-%% spawner's own fallback.
+%% spawner's own fallback. Clamped at ?MAX_BOT_FILL: an unbounded value
+%% here is a DoS vector (asobi_bot_spawner:fill_mode/2 would otherwise
+%% build an equally unbounded bot-add list; see #79 follow-up).
 bots_min_players(BotProps, MatchSize) ->
     case proplists:get_value(~"min_players", BotProps) of
-        MP when is_number(MP), MP > 0 -> trunc(MP);
+        MP when is_number(MP), MP > 0 -> clamp_bot_fill(trunc(MP));
         _ -> MatchSize
     end.
+
+clamp_bot_fill(MP) when MP > ?MAX_BOT_FILL ->
+    ?LOG_WARNING(#{
+        msg => ~"bots.min_players exceeds ceiling, clamping",
+        requested => MP,
+        ceiling => ?MAX_BOT_FILL
+    }),
+    ?MAX_BOT_FILL;
+clamp_bot_fill(MP) ->
+    MP.
 
 %% H1 (2026-05-19): anchor a Lua-supplied relative path inside Base. Reject
 %% absolute paths, `..` segments, and anything whose `filename:absname/1`

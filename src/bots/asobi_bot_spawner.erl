@@ -9,6 +9,9 @@ falls back to default generated names.
 
 -behaviour(gen_server).
 
+-include_lib("kernel/include/logger.hrl").
+-include("asobi_lua_bots.hrl").
+
 -export([start_link/0]).
 -export([init/1, handle_info/2, handle_cast/2, handle_call/3]).
 -ifdef(TEST).
@@ -70,22 +73,20 @@ fill_mode(Mode, Count) when is_binary(Mode), Count > 0 ->
             %% mode with 1 human queued must add at most 1 bot, not
             %% MinPlayers - Count bots that spill into a second match.
             MaxPlayers = mode_max_players(ModeConfig, MinPlayers),
-            Target =
+            RawTarget =
                 case MinPlayers =< MaxPlayers of
                     true -> MinPlayers;
                     false -> MaxPlayers
                 end,
+            %% Defense in depth against ?MAX_BOT_FILL: asobi_lua_config
+            %% already clamps min_players from Lua, but sys.config-declared
+            %% game modes set min_players/max_players directly and bypass
+            %% that check entirely (#79 follow-up, HIGH severity DoS fix).
+            Target = clamp_fill_target(RawTarget),
             case Count < Target of
                 true ->
                     Names = load_bot_names(BotConfig),
-                    BotsNeeded = Target - Count,
-                    lists:foreach(
-                        fun(N) ->
-                            BotId = bot_name(N, Names),
-                            asobi_matchmaker:add(BotId, #{mode => Mode})
-                        end,
-                        lists:seq(1, BotsNeeded)
-                    );
+                    fill_until(Mode, Count, Target, Names);
                 false ->
                     ok
             end;
@@ -94,6 +95,38 @@ fill_mode(Mode, Count) when is_binary(Mode), Count > 0 ->
     end;
 fill_mode(_, _) ->
     ok.
+
+clamp_fill_target(Target) when Target > ?MAX_BOT_FILL ->
+    ?LOG_WARNING(#{
+        msg => ~"bot fill target exceeds ceiling, clamping",
+        requested => Target,
+        ceiling => ?MAX_BOT_FILL
+    }),
+    ?MAX_BOT_FILL;
+clamp_fill_target(Target) ->
+    Target.
+
+%% Adds bots one at a time (rather than building the full
+%% lists:seq(1, Target - Count) up front) and stops as soon as the
+%% matchmaker reports its queue is full, instead of discarding that error
+%% and letting ?CHECK_INTERVAL retry the same unreachable target forever.
+fill_until(Mode, Count, Target, Names) ->
+    fill_until_loop(Mode, 1, Target - Count, Names).
+
+fill_until_loop(_Mode, N, Needed, _Names) when N > Needed ->
+    ok;
+fill_until_loop(Mode, N, Needed, Names) ->
+    BotId = bot_name(N, Names),
+    case asobi_matchmaker:add(BotId, #{mode => Mode}) of
+        {error, queue_full} ->
+            ?LOG_WARNING(#{
+                msg => ~"bot fill stopped: matchmaker queue full",
+                mode => Mode,
+                bots_added => N - 1
+            });
+        _ ->
+            fill_until_loop(Mode, N + 1, Needed, Names)
+    end.
 
 %% --- Match Scanning ---
 
