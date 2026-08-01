@@ -6,11 +6,16 @@ name: Docker publish
 # loudly if the locked ref is behind the latest asobi release rather than
 # silently publishing a stale image.
 #
+# Deliberately fail-open on GitHub API/infrastructure hiccups (rate limit,
+# transient 5xx, timeout, no release yet, malformed response) and fail-closed
+# only on a definite "ahead"/"diverged" comparison - a stale pin should block
+# a publish, a flaky API call should not.
+#
 # Follow-up out of scope for this repo: #103 also proposes a
 # repository_dispatch from asobi's own release workflow to trigger
 # bump-asobi-pin.yml immediately on every asobi release (the fastest fix).
 # That requires adding a dispatch step to widgrensit/asobi's CI, which is a
-# change to a different repo and needs its own PR there.
+# change to a different repo - tracked as widgrensit/asobi#276.
 
 on:
   push:
@@ -37,16 +42,31 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
+
+          # Fail-open on infrastructure hiccups (rate limit, transient 5xx, no
+          # release yet, malformed response), fail-closed only on a definite
+          # "ahead"/"diverged" answer from the compare API. A GitHub API
+          # blip must never block every publish.
+          soft_fail() {
+            echo "::warning::asobi staleness check skipped - $1"
+            exit 0
+          }
 
           locked_ref=$(grep -A2 '<<"asobi">>' rebar.lock | grep -oE '[0-9a-f]{40}' | head -1)
           if [ -z "$locked_ref" ]; then
-            echo "::error::could not extract the locked asobi ref from rebar.lock"
-            exit 1
+            soft_fail "could not extract the locked asobi ref from rebar.lock"
           fi
 
-          latest_tag=$(gh api repos/widgrensit/asobi/releases/latest --jq '.tag_name')
-          latest_sha=$(gh api "repos/widgrensit/asobi/commits/${latest_tag}" --jq '.sha')
+          latest_tag=$(gh api repos/widgrensit/asobi/releases/latest --jq '.tag_name' 2>/dev/null)
+          if [ -z "$latest_tag" ]; then
+            soft_fail "could not fetch the latest widgrensit/asobi release (no release yet, or API error)"
+          fi
+
+          latest_sha=$(gh api "repos/widgrensit/asobi/commits/${latest_tag}" --jq '.sha' 2>/dev/null)
+          if [ -z "$latest_sha" ]; then
+            soft_fail "could not resolve commit sha for asobi release ${latest_tag}"
+          fi
 
           echo "locked asobi ref:     $locked_ref"
           echo "latest asobi release: $latest_tag ($latest_sha)"
@@ -56,7 +76,7 @@ jobs:
             exit 0
           fi
 
-          status=$(gh api "repos/widgrensit/asobi/compare/${locked_ref}...${latest_sha}" --jq '.status')
+          status=$(gh api "repos/widgrensit/asobi/compare/${locked_ref}...${latest_sha}" --jq '.status' 2>/dev/null)
           case "$status" in
             behind)
               echo "locked ref already contains commits not yet in a tagged release; not stale."
@@ -66,8 +86,7 @@ jobs:
               exit 1
               ;;
             *)
-              echo "::error::unexpected git compare status '${status}' between ${locked_ref} and ${latest_sha}; treating as stale out of caution."
-              exit 1
+              soft_fail "unexpected or empty git compare status '${status}' between ${locked_ref} and ${latest_sha} (likely a transient API error)"
               ;;
           esac
 
