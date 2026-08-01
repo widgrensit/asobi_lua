@@ -57,8 +57,8 @@ game.spatial.in_range(entity_a, entity_b, range)
 game.spatial.distance(entity_a, entity_b)
 
 -- Zone spawning (world mode only, requires zone_pid in context)
-game.zone.spawn(template_id, x, y)
-game.zone.spawn(template_id, x, y, overrides)
+game.zone.spawn(template_id, x, y)              -- false if template_id is unknown
+game.zone.spawn(template_id, x, y, overrides)   -- false if template_id is unknown
 game.zone.despawn(entity_id)
 
 -- Terrain (world mode only, requires terrain_store_pid in context)
@@ -665,29 +665,50 @@ decode_spatial_opts(_) ->
 
 %% --- Zone spawning ---
 
-fun_zone_spawn(#{zone_pid := ZonePid}) ->
+%% asobi_lua#110: asobi_zone:spawn_entity/3-4 is a self-cast - the zone's own
+%% Luerl VM runs inside the zone process (zone_pid =:= self(), see
+%% asobi_lua_world:zone_ctx/2), so making the call synchronous to learn
+%% whether the template_id resolved would deadlock the zone. Instead the
+%% zone's declared template set is cached in Ctx at zone init
+%% (asobi_zone_spawner:set_templates/2 only ever runs then, so it can't go
+%% stale within a zone's lifetime) and checked here, before the cast, so a
+%% typo'd template_id returns `false` synchronously instead of a `true` that
+%% just means "the cast was sent", not "something spawned". Ctx without a
+%% `known_templates` key (older/non-world callers, direct API tests) stays
+%% unrestricted - only zone_ctx/2 populates it.
+fun_zone_spawn(#{zone_pid := ZonePid} = Ctx) ->
     fun(Args, St) ->
         case decode_args(Args, St) of
             [TemplateId, X, Y] when is_binary(TemplateId), is_number(X), is_number(Y) ->
-                asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}),
-                {[true], St};
+                case known_template(TemplateId, Ctx) of
+                    true ->
+                        asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}),
+                        {[true], St};
+                    false ->
+                        {[false], St}
+                end;
             [TemplateId, X, Y, Overrides0] when
                 is_binary(TemplateId), is_number(X), is_number(Y)
             ->
-                %% An empty Lua table `{}` decodes (via deep_decode/1) to `[]`,
-                %% not `#{}` - there are no pairs to infer a map from. A
-                %% populated, string-keyed table already decodes to a map.
-                case Overrides0 of
-                    Overrides when is_map(Overrides) ->
-                        asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}, Overrides),
-                        {[true], St};
-                    [] ->
-                        asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}, #{}),
-                        {[true], St};
-                    _ ->
-                        error_result(
-                            ~"zone.spawn requires (template_id, x, y[, overrides])", St
-                        )
+                case known_template(TemplateId, Ctx) of
+                    true ->
+                        %% An empty Lua table `{}` decodes (via deep_decode/1) to `[]`,
+                        %% not `#{}` - there are no pairs to infer a map from. A
+                        %% populated, string-keyed table already decodes to a map.
+                        case Overrides0 of
+                            Overrides when is_map(Overrides) ->
+                                asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}, Overrides),
+                                {[true], St};
+                            [] ->
+                                asobi_zone:spawn_entity(ZonePid, TemplateId, {X, Y}, #{}),
+                                {[true], St};
+                            _ ->
+                                error_result(
+                                    ~"zone.spawn requires (template_id, x, y[, overrides])", St
+                                )
+                        end;
+                    false ->
+                        {[false], St}
                 end;
             _ ->
                 error_result(~"zone.spawn requires (template_id, x, y[, overrides])", St)
@@ -695,6 +716,12 @@ fun_zone_spawn(#{zone_pid := ZonePid}) ->
     end;
 fun_zone_spawn(_) ->
     fun(_, St) -> error_result(~"zone.spawn not available (no zone context)", St) end.
+
+-spec known_template(binary(), map()) -> boolean().
+known_template(TemplateId, #{known_templates := Templates}) ->
+    maps:is_key(TemplateId, Templates);
+known_template(_TemplateId, _Ctx) ->
+    true.
 
 fun_zone_despawn(#{zone_pid := ZonePid}) ->
     fun(Args, St) ->

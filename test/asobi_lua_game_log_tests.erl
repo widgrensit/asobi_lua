@@ -205,13 +205,20 @@ control_chars_stripped() ->
     ?assertEqual(~"afake log lineb\tc", maps:get(message, Report)).
 
 zone_ctx_carries_script() ->
-    Ctx = asobi_lua_world:zone_ctx(#{
-        world_server_pid => self(),
-        game_config => #{match_id => ~"w1", lua_script => ~"priv/lua/world.lua"}
-    }),
+    Templates = #{~"goblin" => #{type => ~"npc", base_state => #{}}},
+    Ctx = asobi_lua_world:zone_ctx(
+        #{
+            world_server_pid => self(),
+            game_config => #{match_id => ~"w1", lua_script => ~"priv/lua/world.lua"}
+        },
+        Templates
+    ),
     ?assertEqual(~"priv/lua/world.lua", maps:get(script, Ctx)),
     ?assertEqual(self(), maps:get(zone_pid, Ctx)),
-    ?assertEqual(~"w1", maps:get(match_id, Ctx)).
+    ?assertEqual(~"w1", maps:get(match_id, Ctx)),
+    %% asobi_lua#110: zone_ctx/2 caches the zone's declared template set so
+    %% game.zone.spawn can validate template_id without a round trip.
+    ?assertEqual(Templates, maps:get(known_templates, Ctx)).
 
 make_ctx_carries_script() ->
     Ctx = asobi_lua_world:make_ctx(#{

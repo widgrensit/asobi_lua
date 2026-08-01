@@ -39,7 +39,7 @@ templates become spawnable without restarting the zone.
 -export([init/1, join/2, join/3, leave/2, spawn_position/2]).
 -export([zone_tick/2, handle_input/3, post_tick/2]).
 -ifdef(TEST).
--export([zone_ctx/1, make_ctx/1]).
+-export([zone_ctx/2, make_ctx/1]).
 -endif.
 -export([generate_world/2, get_state/2]).
 -export([phases/1, on_phase_started/2, on_phase_ended/2]).
@@ -807,7 +807,18 @@ init_zone_state(Config, ZoneState00) ->
         undefined ->
             ZoneState0;
         ScriptPath ->
-            PreInstall = fun(St) -> asobi_lua_api:install(zone_ctx(Config), St) end,
+            %% asobi_lua#110: ask the script for its declared template set up
+            %% front (a throwaway VM, same mechanism as spawn_templates/1's
+            %% raw-config clause) so zone_ctx/2 can cache it in Ctx before the
+            %% per-zone VM's game.zone.spawn is ever callable. game.zone.spawn
+            %% checks membership against this cached set synchronously,
+            %% instead of round-tripping the self-cast to asobi_zone (which
+            %% would deadlock - the zone's Luerl VM runs inside the zone
+            %% process itself). asobi_zone_spawner:set_templates/2 also only
+            %% ever runs at zone init/deserialise, so this can't go stale
+            %% within the zone's lifetime.
+            Templates = spawn_templates(Config),
+            PreInstall = fun(St) -> asobi_lua_api:install(zone_ctx(Config, Templates), St) end,
             case asobi_lua_loader:new(ScriptPath, ?GENERATE_TIMEOUT, PreInstall) of
                 {ok, LuaSt0} ->
                     {GameState, LuaSt1} = restore_game_state(ZoneState0, LuaSt0),
@@ -852,14 +863,17 @@ restore_game_state(ZoneState0, LuaSt) ->
         _ -> {nil, LuaSt}
     end.
 
--spec zone_ctx(map()) -> map().
-zone_ctx(Config) ->
+-spec zone_ctx(map(), #{binary() => asobi_zone_spawner:spawn_template()}) -> map().
+zone_ctx(Config, Templates) ->
     GameConfig = maps:get(game_config, Config, #{}),
     #{
         zone_pid => self(),
         match_pid => maps:get(world_server_pid, Config, self()),
         match_id => maps:get(match_id, GameConfig, maps:get(world_id, Config, undefined)),
-        script => maps:get(lua_script, GameConfig, undefined)
+        script => maps:get(lua_script, GameConfig, undefined),
+        %% asobi_lua#110: game.zone.spawn checks membership against this
+        %% before ever casting to the zone process.
+        known_templates => Templates
     }.
 
 %% Config is either the game_config directly (init/1, phases/1 - lua_script

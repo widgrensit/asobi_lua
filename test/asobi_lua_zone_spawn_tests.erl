@@ -38,7 +38,9 @@ zone_spawn_test_() ->
             fun unseeded_game_state_round_trips_as_nil/0},
         {"dump_zone_state without a VM stays jsonb-safe", fun dump_without_vm_is_jsonb_safe/0},
         {"game.zone.spawn from Lua reaches a live zone built via handle_continue",
-            fun lua_spawn_reaches_zone/0}
+            fun lua_spawn_reaches_zone/0},
+        {"game.zone.spawn returns false for a typo'd template_id, true for a known one",
+            fun typo_template_id_returns_false/0}
     ]}.
 
 zone_config() ->
@@ -47,6 +49,15 @@ zone_config() ->
         coords => {0, 0},
         game_module => asobi_lua_world,
         game_config => #{lua_script => fixture("spawn_world.lua")},
+        world_server_pid => self()
+    }.
+
+typo_zone_config() ->
+    #{
+        world_id => ~"spawn_world_typo",
+        coords => {0, 0},
+        game_module => asobi_lua_world,
+        game_config => #{lua_script => fixture("spawn_world_typo.lua")},
         world_server_pid => self()
     }.
 
@@ -118,6 +129,29 @@ lua_spawn_reaches_zone() ->
     ?assertEqual([~"common", ~"rare"], ChestLoot),
 
     gen_server:stop(ZonePid),
+    erlang:erase({asobi_lua_world, zone_state}).
+
+%% asobi_lua#110: game.zone.spawn checks the zone's declared template set
+%% (cached in zone_ctx/2 at init) synchronously, before ever casting to the
+%% zone process - a typo'd template_id must return false, not the true a
+%% caller would wrongly get just because the fire-and-forget cast was sent.
+typo_template_id_returns_false() ->
+    erlang:erase({asobi_lua_world, zone_state}),
+    ZoneState0 = asobi_lua_world:init_zone_state(typo_zone_config(), #{}),
+    {_Ents, ZoneState1} = asobi_lua_world:zone_tick(#{}, ZoneState0),
+    flush_casts(),
+
+    Dumped = asobi_lua_world:dump_zone_state(ZoneState1),
+    ?assertEqual(
+        #{
+            ~"game_state" => #{
+                ~"seeded" => true,
+                ~"known_result" => true,
+                ~"typo_result" => false
+            }
+        },
+        Dumped
+    ),
     erlang:erase({asobi_lua_world, zone_state}).
 
 unseeded_game_state_round_trips_as_nil() ->
