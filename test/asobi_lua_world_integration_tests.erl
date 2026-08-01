@@ -85,6 +85,77 @@ spawn_templates_reach_a_real_zone_test_() ->
         end
     end}.
 
+%% widgrensit/asobi#270 end-to-end regression: proves a Lua-world player
+%% actually re-homes across a zone boundary through a REAL asobi_zone
+%% process, not just that the returned entity map has the corrected key
+%% shape. Before the fix, asobi_zone:find_zone_crossings/5's atom-keyed
+%% clauses never matched a Lua world's binary-keyed entities, so the player
+%% below would stay stuck in zone (0,0) forever regardless of position.
+zone_crossing_rehomes_lua_player_test_() ->
+    {timeout, 10, fun() ->
+        Config = (world_config(fixture("world_zone_crossing_e2e.lua")))#{
+            grid_size => 4,
+            zone_size => 100
+        },
+        InstancePid = start_world(Config),
+        try
+            WorldPid = asobi_world_instance:get_child(InstancePid, asobi_world_server),
+            true = is_pid(WorldPid),
+            ZoneManagerPid = asobi_world_instance:get_child(InstancePid, asobi_zone_manager),
+
+            %% move_player/4 (the actual removal-from-old-zone mechanism)
+            %% goes through the world server's player_zones tracking, not
+            %% the zone alone - a player injected via player_input/3 without
+            %% ever joining never gets that entry, so it can never be
+            %% rehomed. join/2 is what a real client connection does before
+            %% sending any input.
+            ok = asobi_world_server:join(WorldPid, ~"p1"),
+            timer:sleep(20),
+            {ok, ZoneAPid} = asobi_zone_manager:get_zone(ZoneManagerPid, {0, 0}),
+
+            %% Place the player well inside zone (0,0) (boundary at x=100).
+            ok = asobi_zone:player_input(ZoneAPid, ~"p1", #{
+                ~"kind" => ~"move", ~"x" => 50, ~"y" => 50
+            }),
+            InZoneA = poll_until(
+                fun() -> maps:get(~"p1", asobi_zone:get_entities(ZoneAPid), undefined) end,
+                fun(E) -> is_map(E) end,
+                2000
+            ),
+            ?assertMatch(#{type := ~"player", x := 50, y := 50}, InZoneA),
+
+            %% Move 20 units past the boundary - past the default 15-unit
+            %% (zone_size * 0.15) hysteresis margin, so this must register as
+            %% a real crossing, not jitter.
+            ok = asobi_zone:player_input(ZoneAPid, ~"p1", #{
+                ~"kind" => ~"move", ~"x" => 120, ~"y" => 50
+            }),
+
+            %% Direct proof of re-homing: the player must disappear from
+            %% zone (0,0)'s own entity set once it crosses out, driven by the
+            %% world's own tick loop (tick_rate => 20 in world_config/1) -
+            %% no manually forced tick.
+            LeftZoneA = poll_until(
+                fun() -> maps:is_key(~"p1", asobi_zone:get_entities(ZoneAPid)) end,
+                fun(StillThere) -> StillThere =:= false end,
+                3000
+            ),
+            ?assertEqual(false, LeftZoneA),
+
+            %% And it must land in the zone it actually crossed into, with
+            %% its live (moved) position - not a stale copy.
+            {ok, ZoneBPid} = asobi_zone_manager:get_zone(ZoneManagerPid, {1, 0}),
+            InZoneB = poll_until(
+                fun() -> maps:get(~"p1", asobi_zone:get_entities(ZoneBPid), undefined) end,
+                fun(E) -> is_map(E) end,
+                2000
+            ),
+            ?assertMatch(#{type := ~"player", x := 120, y := 50}, InZoneB)
+        after
+            catch exit(InstancePid, shutdown)
+        end
+    end}.
+
 phases_reach_the_world_server_test_() ->
     {timeout, 10, fun() ->
         InstancePid = start_world(),
