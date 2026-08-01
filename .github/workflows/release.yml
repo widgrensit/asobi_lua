@@ -1,0 +1,20 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'guides/**'
+      - 'LICENSE'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    uses: Taure/erlang-ci/.github/workflows/release.yml@v2.1.4
+    permissions:
+      contents: write
