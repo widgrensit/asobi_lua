@@ -44,6 +44,10 @@ api_test_() ->
         {"game.spatial.query_radius opts filter by type", fun spatial_query_radius_with_opts/0},
         {"game.spatial.nearest returns closest", fun spatial_nearest/0},
         {"game.spatial.nearest opts forwards max_results", fun spatial_nearest_with_opts/0},
+        {"game.spatial.query_radius accepts an empty entities table",
+            fun spatial_query_radius_empty_entities/0},
+        {"game.spatial.nearest accepts an empty entities table",
+            fun spatial_nearest_empty_entities/0},
         {"game.spatial.in_range checks distance", fun spatial_in_range/0},
         {"game.spatial.distance returns distance", fun spatial_distance/0},
         {"game.zone.spawn calls zone", fun zone_spawn/0},
@@ -400,6 +404,20 @@ spatial_nearest_with_opts() ->
     {ok, [Count | _], _} = eval(Code, St),
     ?assertEqual(1, trunc(Count)),
     ?assert(meck:called(asobi_spatial, nearest, '_')).
+
+%% asobi#108: an empty Lua table `{}` decodes to `[]`, not `#{}` - a zone
+%% with no entities yet must not be rejected outright.
+spatial_query_radius_empty_entities() ->
+    St = install_api(),
+    Code = "local r = game.spatial.query_radius({}, 1.0, 1.0, 3.0)\nreturn #r",
+    {ok, [Count | _], _} = eval(Code, St),
+    ?assertEqual(0, trunc(Count)).
+
+spatial_nearest_empty_entities() ->
+    St = install_api(),
+    Code = "local r = game.spatial.nearest({}, 1.0, 1.0, 3)\nreturn #r",
+    {ok, [Count | _], _} = eval(Code, St),
+    ?assertEqual(0, trunc(Count)).
 
 zone_spawn_with_overrides() ->
     St = install_api_with_zone(),
