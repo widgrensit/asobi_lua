@@ -2,6 +2,9 @@
 -include_lib("eunit/include/eunit.hrl").
 -include_lib("kernel/include/file.hrl").
 
+%% logger handler callback for script_log_limiter_test_/0 below.
+-export([log/2]).
+
 -spec fixture(string()) -> file:filename_all().
 fixture(Name) ->
     {ok, LibDir} = safe_lib_dir(),
@@ -669,6 +672,124 @@ hot_reload_zone_tick_survives_syntax_error_test() ->
     after
         erlang:erase({asobi_lua_world, zone_state}),
         file:delete(Path)
+    end.
+
+hot_reload_zone_tick_signals_spawn_templates_hint_test() ->
+    %% asobi#253: a script edited on disk can add spawn templates that
+    %% weren't present when the zone was created. spawn_templates_hint/1
+    %% is how asobi_zone finds out, without polling every tick itself.
+    Path = world_temp_script(
+        ~"""
+        function init(_) return {} end
+        function spawn_position(_, _) return { x = 0, y = 0 } end
+        function generate_world(_, _) return { ['0,0'] = {} } end
+        function zone_tick(e, z) return e, z end
+        function handle_input(_, _, e) return e end
+        function post_tick(_, s) return s end
+        function spawn_templates(_) return { goblin = { max_count = 3 } } end
+        """
+    ),
+    try
+        Config = #{game_config => #{lua_script => Path}, mode => ~"test"},
+        {ok, ZoneStates} = asobi_lua_world:generate_world(0, Config),
+        Zone0 = asobi_lua_world:init_zone_state(Config, maps:get({0, 0}, ZoneStates)),
+        erlang:erase({asobi_lua_world, zone_state}),
+        {_Ents0, Zone1} = asobi_lua_world:zone_tick(#{}, Zone0),
+        ?assertEqual(unchanged, asobi_lua_world:spawn_templates_hint(Zone1)),
+
+        ok = file:write_file(
+            Path,
+            ~"""
+            function init(_) return {} end
+            function spawn_position(_, _) return { x = 0, y = 0 } end
+            function generate_world(_, _) return { ['0,0'] = {} } end
+            function zone_tick(e, z) return e, z end
+            function handle_input(_, _, e) return e end
+            function post_tick(_, s) return s end
+            function spawn_templates(_)
+                return { goblin = { max_count = 3 }, dragon = { max_count = 1 } }
+            end
+            """
+        ),
+        bump_mtime(Path),
+
+        {_Ents1, Zone2} = asobi_lua_world:zone_tick(#{}, Zone1),
+        ?assertMatch(
+            {changed, #{~"goblin" := _, ~"dragon" := _}},
+            asobi_lua_world:spawn_templates_hint(Zone2)
+        ),
+
+        %% The signal is one-tick only - it must not leak into the next tick.
+        {_Ents2, Zone3} = asobi_lua_world:zone_tick(#{}, Zone2),
+        ?assertEqual(unchanged, asobi_lua_world:spawn_templates_hint(Zone3))
+    after
+        erlang:erase({asobi_lua_world, zone_state}),
+        file:delete(Path)
+    end.
+
+%% --- Script-error log rate limiting (asobi#252) ---
+%%
+%% log_lua_error/3 gates its ?LOG_WARNING behind asobi_script_log_limiter,
+%% keyed on {Script, Callback} - a script that fails on every tick must not
+%% flood the logs. The limiter's own rate math is covered on the asobi side
+%% (asobi_script_log_limiter_tests); these pin the wiring here: the right key
+%% is queried, a deny actually suppresses the log line (not just the count),
+%% and an allow lets it through.
+
+script_log_limiter_test_() ->
+    {foreach, fun log_limiter_setup/0, fun log_limiter_cleanup/1, [
+        {"a denied key is suppressed, not logged per call", fun script_log_suppressed_on_deny/0},
+        {"an allowed call is logged with the {script, callback} key intact",
+            fun script_log_allowed_key_shape/0}
+    ]}.
+
+log_limiter_setup() ->
+    OldPrimary = logger:get_primary_config(),
+    ok = logger:set_primary_config(level, all),
+    ok = logger:add_handler(?MODULE, ?MODULE, #{config => undefined, level => all}),
+    meck:new(seki, [no_link, passthrough]),
+    OldPrimary.
+
+log_limiter_cleanup(OldPrimary) ->
+    _ = logger:remove_handler(?MODULE),
+    ok = logger:set_primary_config(OldPrimary),
+    meck:unload(seki).
+
+%% eunit runs each foreach test in its own process, so the receiving pid
+%% must be attached per-test, not captured in setup.
+attach_log() ->
+    ok = logger:set_handler_config(?MODULE, config, self()).
+
+log(#{level := Level, msg := {report, Report}}, #{config := Pid}) ->
+    Pid ! {lua_world_log, Level, Report};
+log(_, _) ->
+    ok.
+
+script_log_suppressed_on_deny() ->
+    attach_log(),
+    meck:expect(seki, check, fun(asobi_script_log_limiter, _Key) -> {deny, 0} end),
+    Config = #{game_config => #{lua_script => "/nonexistent/path.lua"}},
+    ?assertEqual({ok, #{}}, asobi_lua_world:generate_world(0, Config)),
+    ?assertEqual({ok, #{}}, asobi_lua_world:generate_world(0, Config)),
+    ?assertEqual({ok, #{}}, asobi_lua_world:generate_world(0, Config)),
+    receive
+        {lua_world_log, warning, _} -> error(unexpected_log_line_while_denied)
+    after 50 -> ok
+    end,
+    ?assertEqual(3, meck:num_calls(seki, check, [asobi_script_log_limiter, '_'])).
+
+script_log_allowed_key_shape() ->
+    attach_log(),
+    meck:expect(seki, check, fun
+        (asobi_script_log_limiter, {"/nonexistent/path.lua", generate_world}) -> {allow, 1};
+        (asobi_script_log_limiter, Other) -> error({unexpected_key, Other})
+    end),
+    Config = #{game_config => #{lua_script => "/nonexistent/path.lua"}},
+    ?assertEqual({ok, #{}}, asobi_lua_world:generate_world(0, Config)),
+    receive
+        {lua_world_log, warning, Report} ->
+            ?assertEqual(generate_world, maps:get(callback, Report))
+    after 1000 -> error(no_log_received)
     end.
 
 %% --- Helpers ---

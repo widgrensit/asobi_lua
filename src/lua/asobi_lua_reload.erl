@@ -72,25 +72,32 @@ maybe_hot_reload(State) ->
 
 -spec do_maybe_reload(map()) -> map().
 do_maybe_reload(#{script := Path, script_mtime := OldMtime, lua_state := LuaSt} = State) ->
+    %% just_reloaded is a one-tick signal, not a state field - clear it here so
+    %% it never survives past the tick that actually reloaded the script.
+    State0 = maps:remove(just_reloaded, State),
     case filelib:last_modified(Path) of
         0 ->
-            State;
+            State0;
         OldMtime ->
-            State;
+            State0;
         NewMtime ->
             case reload_script(Path, LuaSt) of
                 {ok, NewLuaSt} ->
                     ?LOG_NOTICE(#{
                         msg => ~"lua hot reload", script => Path, mtime => NewMtime
                     }),
-                    State#{lua_state => NewLuaSt, script_mtime => NewMtime};
+                    State0#{
+                        lua_state => NewLuaSt,
+                        script_mtime => NewMtime,
+                        just_reloaded => true
+                    };
                 {error, Reason} ->
                     ?LOG_WARNING(#{
                         msg => ~"lua hot reload failed",
                         script => Path,
                         reason => Reason
                     }),
-                    State#{script_mtime => NewMtime}
+                    State0#{script_mtime => NewMtime}
             end
     end;
 do_maybe_reload(State) ->
