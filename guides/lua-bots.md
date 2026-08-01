@@ -31,8 +31,12 @@ list to your bot script:
 match_size = 4
 max_players = 8
 strategy = "fill"
-bots = { script = "bots/chaser.lua" }
+bots = { script = "bots/chaser.lua", min_players = 4 }
 ```
+
+`bots.min_players` is optional and defaults to `match_size`. `bots.enabled`
+is also optional and defaults to `true` (set it to `false` to keep the
+table around, e.g. to declare `min_players`, while disabling bot-fill).
 
 ```lua
 -- bots/chaser.lua
@@ -47,9 +51,10 @@ The platform reads `names` from your bot script at runtime. Bot names are
 prefixed with `bot_` (e.g., `bot_Spark`).
 
 The spawner checks the queue every 8 seconds (a fixed interval, not tunable) and
-fills a waiting match with bots up to the mode's `min_players`. Both settings
-below live in the game mode's `bots` map — there are no bot environment
-variables.
+fills a waiting match with bots up to the mode's `min_players`, capped at
+`max_players` so a small `match_size`/`max_players` mode never overshoots into
+a second, bot-only match. Both settings below live in the game mode's `bots`
+map — there are no bot environment variables.
 
 ### Erlang (sys.config)
 

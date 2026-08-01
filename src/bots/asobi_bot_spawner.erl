@@ -11,6 +11,9 @@ falls back to default generated names.
 
 -export([start_link/0]).
 -export([init/1, handle_info/2, handle_cast/2, handle_call/3]).
+-ifdef(TEST).
+-export([fill_mode/2]).
+-endif.
 
 -define(CHECK_INTERVAL, 8000).
 -define(SCAN_INTERVAL, 2000).
@@ -58,14 +61,24 @@ fill_queue_with_bots() ->
     end.
 
 fill_mode(Mode, Count) when is_binary(Mode), Count > 0 ->
-    BotConfig = bot_config(Mode),
+    ModeConfig = mode_config(Mode),
+    BotConfig = maps:get(bots, ModeConfig, #{}),
     case maps:get(enabled, BotConfig, false) of
         true ->
-            MinPlayers = maps:get(min_players, BotConfig, 4),
-            case Count < MinPlayers of
+            MinPlayers = bot_min_players(BotConfig),
+            %% Never fill past max_players: a match_size=2/max_players=2
+            %% mode with 1 human queued must add at most 1 bot, not
+            %% MinPlayers - Count bots that spill into a second match.
+            MaxPlayers = mode_max_players(ModeConfig, MinPlayers),
+            Target =
+                case MinPlayers =< MaxPlayers of
+                    true -> MinPlayers;
+                    false -> MaxPlayers
+                end,
+            case Count < Target of
                 true ->
                     Names = load_bot_names(BotConfig),
-                    BotsNeeded = MinPlayers - Count,
+                    BotsNeeded = Target - Count,
                     lists:foreach(
                         fun(N) ->
                             BotId = bot_name(N, Names),
@@ -159,15 +172,30 @@ load_bot_names(#{script := Script}) when is_binary(Script); is_list(Script) ->
 load_bot_names(_) ->
     default_names().
 
-bot_config(Mode) ->
+mode_config(Mode) ->
     Modes =
         case application:get_env(asobi, game_modes, #{}) of
             M when is_map(M) -> M;
             _ -> #{}
         end,
-    case maps:get(Mode, Modes, #{}) of
+    maps:get(Mode, Modes, #{}).
+
+bot_config(Mode) ->
+    case mode_config(Mode) of
         #{bots := Bots} when is_map(Bots) -> Bots;
         _ -> #{}
+    end.
+
+bot_min_players(BotConfig) ->
+    case maps:get(min_players, BotConfig, 4) of
+        MP when is_integer(MP), MP > 0 -> MP;
+        _ -> 4
+    end.
+
+mode_max_players(ModeConfig, Default) ->
+    case maps:get(max_players, ModeConfig, Default) of
+        MP when is_integer(MP), MP > 0 -> MP;
+        _ -> Default
     end.
 
 bot_script(Mode) ->
