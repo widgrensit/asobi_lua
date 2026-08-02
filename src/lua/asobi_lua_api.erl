@@ -963,7 +963,30 @@ storage_update(Collection, Key, PlayerId, Value) ->
     Q1 = kura_query:where(Q0, {collection, Collection}),
     Q2 = kura_query:where(Q1, {key, Key}),
     Q3 = maybe_filter_player(Q2, PlayerId),
-    asobi_repo:update_all(Q3, #{value => Value, updated_at => calendar:universal_time()}).
+    Params = #{value => Value, updated_at => calendar:universal_time()},
+    CS = kura_changeset:cast(asobi_storage, #{}, Params, maps:keys(Params)),
+    case kura_changeset:apply_action(CS, update) of
+        {ok, Changes} ->
+            asobi_repo:update_all(Q3, dump_storage_changes(Changes));
+        {error, _} = Err ->
+            Err
+    end.
+
+%% update_all/2 bypasses the schema, so its params never go through
+%% kura_types:dump/2 the way a changeset-backed insert/update does. Without
+%% this, a jsonb `value` map is handed to the driver raw and comes back
+%% `{error, badarg}` (widgrensit/asobi#296).
+dump_storage_changes(Changes) ->
+    Types = kura_schema:field_types(asobi_storage),
+    maps:map(
+        fun(Field, V) ->
+            case kura_types:dump(maps:get(Field, Types), V) of
+                {ok, Dumped} -> Dumped;
+                {error, _} -> V
+            end
+        end,
+        Changes
+    ).
 
 maybe_filter_player(Q, undefined) -> Q;
 maybe_filter_player(Q, PlayerId) -> kura_query:where(Q, {player_id, PlayerId}).

@@ -37,6 +37,8 @@ api_test_() ->
         {"game.storage.set writes doc", fun game_storage_set/0},
         {"game.storage.player_get reads player doc", fun game_storage_player_get/0},
         {"game.storage.player_set writes player doc", fun game_storage_player_set/0},
+        {"game.storage.set upserts on a second write (asobi#296)",
+            fun game_storage_set_upserts_second_write/0},
         {"game.chat.send sends message", fun game_chat_send/0},
         {"api installed in match init", fun api_in_match_init/0},
         {"game api callable from lua script", fun game_api_from_script/0},
@@ -253,6 +255,43 @@ game_storage_player_set() ->
     Code =
         "local r = game.storage.player_set('p1', 'inventory', 'gold', { count = 50 })\nreturn r.ok ~= nil",
     {ok, [true | _], _} = eval(Code, St).
+
+%% asobi/#296: a second game.storage.set for the same key used to hand
+%% update_all/2 a raw jsonb map, which a real driver rejects with
+%% `{error, badarg}` - the row's value never changed after the first
+%% write. Simulate that failure mode: the fake update_all only succeeds
+%% when it receives a dumped (binary) value, and round-trips it back
+%% into the fake row so a subsequent get proves the new value stuck.
+game_storage_set_upserts_second_write() ->
+    St = install_api(),
+    erase(storage_probe_value),
+    meck:expect(asobi_repo, all, fun(_Q) ->
+        case get(storage_probe_value) of
+            undefined -> {ok, []};
+            V -> {ok, [#{value => V}]}
+        end
+    end),
+    meck:expect(asobi_repo, insert, fun(CS) ->
+        Value = kura_changeset:get_change(CS, value),
+        put(storage_probe_value, Value),
+        {ok, #{value => Value}}
+    end),
+    meck:expect(asobi_repo, update_all, fun(_Q, Updates) ->
+        case maps:get(value, Updates) of
+            V when is_binary(V) ->
+                put(storage_probe_value, json:decode(V)),
+                {ok, 1};
+            _ ->
+                {error, badarg}
+        end
+    end),
+    Code1 = "local a = game.storage.set('t', 'probe', { n = 1 })\nreturn a.ok ~= nil",
+    {ok, [true | _], _} = eval(Code1, St),
+    Code2 =
+        "local b = game.storage.set('t', 'probe', { n = 2 })\n"
+        "local c = game.storage.get('t', 'probe')\n"
+        "return b.ok ~= nil and c.ok.n == 2",
+    {ok, [true | _], _} = eval(Code2, St).
 
 game_economy_grant() ->
     St = install_api(),
