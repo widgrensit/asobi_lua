@@ -1,5 +1,6 @@
 -module(asobi_lua_api_tests).
 -include_lib("eunit/include/eunit.hrl").
+-include_lib("kura/include/kura.hrl").
 
 -spec fixture(string()) -> file:filename_all().
 fixture(Name) ->
@@ -37,6 +38,10 @@ api_test_() ->
         {"game.storage.set writes doc", fun game_storage_set/0},
         {"game.storage.player_get reads player doc", fun game_storage_player_get/0},
         {"game.storage.player_set writes player doc", fun game_storage_player_set/0},
+        {"game.storage.set upserts on a second write (asobi#296)",
+            fun game_storage_set_upserts_second_write/0},
+        {"game.storage.set scopes global vs player rows independently (asobi#296 follow-up)",
+            fun game_storage_isolates_global_and_player_writes/0},
         {"game.chat.send sends message", fun game_chat_send/0},
         {"api installed in match init", fun api_in_match_init/0},
         {"game api callable from lua script", fun game_api_from_script/0},
@@ -122,7 +127,7 @@ setup() ->
     meck:expect(asobi_repo, all, fun(_) -> {ok, []} end),
     meck:expect(asobi_repo, insert, fun(_) -> {ok, #{value => #{}}} end),
     meck:expect(asobi_repo, insert, fun(_, _) -> {ok, #{value => #{}}} end),
-    meck:expect(asobi_repo, update_all, fun(_, _) -> {ok, 1} end),
+    meck:expect(asobi_repo, update, fun(_) -> {ok, #{value => #{}}} end),
     meck:new(asobi_chat_channel, [no_link]),
     meck:expect(asobi_chat_channel, send_message, fun(_, _, _) -> ok end),
     meck:new(asobi_zone, [no_link]),
@@ -253,6 +258,144 @@ game_storage_player_set() ->
     Code =
         "local r = game.storage.player_set('p1', 'inventory', 'gold', { count = 50 })\nreturn r.ok ~= nil",
     {ok, [true | _], _} = eval(Code, St).
+
+%% asobi/#296: a second game.storage.set for the same key used to hand
+%% update_all/2 a raw jsonb map, which a real driver rejects with
+%% `{error, badarg}` - the row's value never changed after the first
+%% write. The fix routes updates through asobi_repo:update/1 on a
+%% changeset fetched by identity instead, so the fake update/1 here just
+%% round-trips the cast value into the fake row, proving the second
+%% write actually lands.
+game_storage_set_upserts_second_write() ->
+    St = install_api(),
+    erase(storage_probe_value),
+    meck:expect(asobi_repo, all, fun(_Q) ->
+        case get(storage_probe_value) of
+            undefined -> {ok, []};
+            V -> {ok, [#{id => ~"row-1", value => V, version => 1}]}
+        end
+    end),
+    meck:expect(asobi_repo, insert, fun(CS) ->
+        Value = kura_changeset:get_change(CS, value),
+        put(storage_probe_value, Value),
+        {ok, #{value => Value}}
+    end),
+    meck:expect(asobi_repo, update, fun(CS) ->
+        Value = kura_changeset:get_change(CS, value),
+        put(storage_probe_value, Value),
+        {ok, #{value => Value}}
+    end),
+    Code1 = "local a = game.storage.set('t', 'probe', { n = 1 })\nreturn a.ok ~= nil",
+    {ok, [true | _], _} = eval(Code1, St),
+    Code2 =
+        "local b = game.storage.set('t', 'probe', { n = 2 })\n"
+        "local c = game.storage.get('t', 'probe')\n"
+        "return b.ok ~= nil and c.ok.n == 2",
+    {ok, [true | _], _} = eval(Code2, St).
+
+%% widgrensit/asobi#296 follow-up (CRITICAL): storage_update/2 must scope
+%% its write to the exact row storage_find/3 resolved by primary key, not
+%% a bare collection+key match with no player_id predicate - otherwise a
+%% global game.storage.set can overwrite a player's row (or vice versa).
+%%
+%% The fake asobi_repo:all/1 below derives its lookup key from the
+%% *actual* WHERE conditions the query carries (query_scope_key/1 only
+%% matches a query with exactly `{player_id, is_nil}` or
+%% `{player_id, PlayerId}` as its third condition) - it does not accept
+%% any query shape. Against the pre-fix code path (no player_id
+%% predicate on the global branch) this crashes with a function_clause
+%% instead of silently matching the wrong row, so the test fails loudly
+%% without the fix and passes with it.
+game_storage_isolates_global_and_player_writes() ->
+    St = install_api(),
+    erase(storage_probe_rows),
+    put(storage_probe_rows, #{}),
+    meck:expect(asobi_repo, all, fun(Q) ->
+        Scope = query_scope_key(Q),
+        Rows = get_storage_rows(),
+        case maps:get(Scope, Rows, undefined) of
+            undefined -> {ok, []};
+            Row -> {ok, [Row]}
+        end
+    end),
+    meck:expect(asobi_repo, insert, fun(CS) ->
+        Collection = kura_changeset:get_field(CS, collection),
+        Key = kura_changeset:get_field(CS, key),
+        PlayerId = kura_changeset:get_field(CS, player_id),
+        Value = kura_changeset:get_field(CS, value),
+        Scope = storage_scope_key(Collection, Key, PlayerId),
+        Row = #{id => Scope, value => Value, version => 1},
+        put_storage_rows((get_storage_rows())#{Scope => Row}),
+        {ok, Row}
+    end),
+    meck:expect(asobi_repo, update, fun(CS) ->
+        Doc = CS#kura_changeset.data,
+        Scope = maps:get(id, Doc),
+        Value = kura_changeset:get_field(CS, value),
+        Version = kura_changeset:get_field(CS, version),
+        Row = Doc#{value => Value, version => Version},
+        put_storage_rows((get_storage_rows())#{Scope => Row}),
+        {ok, Row}
+    end),
+
+    %% Seed a global row and a player-scoped row under the SAME
+    %% collection+key. player_id is a `uuid` schema field, so use a
+    %% valid 36-char UUID string rather than a bare name.
+    Alice = "11111111-1111-1111-1111-111111111111",
+    Code1 =
+        "local g1 = game.storage.set('save', 'flag', { owner = 'global' })\n"
+        "local p1 = game.storage.player_set('" ++ Alice ++
+            "', 'save', 'flag', { owner = 'alice' })\n"
+            "return g1.ok ~= nil and p1.ok ~= nil",
+    {ok, [true | _], _} = eval(Code1, St),
+
+    %% Writing the player's row a second time must not touch the global
+    %% row.
+    Code2 =
+        "local p2 = game.storage.player_set('" ++ Alice ++
+            "', 'save', 'flag', { owner = 'alice', n = 2 })\n"
+            "local g2 = game.storage.get('save', 'flag')\n"
+            "local pg2 = game.storage.player_get('" ++ Alice ++
+            "', 'save', 'flag')\n"
+            "return p2.ok ~= nil and g2.ok.owner == 'global' and pg2.ok.owner == 'alice' and pg2.ok.n == 2",
+    {ok, [true | _], _} = eval(Code2, St),
+
+    %% ...and writing the global row a second time must not touch the
+    %% player's row. Both survive independent second writes.
+    Code3 =
+        "local g3 = game.storage.set('save', 'flag', { owner = 'global', n = 3 })\n"
+        "local pg3 = game.storage.player_get('" ++ Alice ++
+            "', 'save', 'flag')\n"
+            "local g4 = game.storage.get('save', 'flag')\n"
+            "return g3.ok ~= nil and pg3.ok.owner == 'alice' and pg3.ok.n == 2"
+            " and g4.ok.owner == 'global' and g4.ok.n == 3",
+    {ok, [true | _], _} = eval(Code3, St).
+
+%% Collection/Key/PlayerId arrive as `term()` from
+%% kura_changeset:get_field/2 and kura_query's untyped wheres list - keep
+%% the spec honest rather than asserting a narrower type eqwalizer can't
+%% verify.
+-spec storage_scope_key(term(), term(), term()) -> term().
+storage_scope_key(Collection, Key, undefined) -> {Collection, Key, global};
+storage_scope_key(Collection, Key, PlayerId) -> {Collection, Key, PlayerId}.
+
+-spec get_storage_rows() -> #{term() => term()}.
+get_storage_rows() ->
+    case get(storage_probe_rows) of
+        Rows when is_map(Rows) -> Rows;
+        _ -> #{}
+    end.
+
+-spec put_storage_rows(#{term() => term()}) -> ok.
+put_storage_rows(Rows) ->
+    put(storage_probe_rows, Rows),
+    ok.
+
+-spec query_scope_key(#kura_query{}) -> term().
+query_scope_key(#kura_query{wheres = [{collection, Collection}, {key, Key}, {player_id, is_nil}]}) ->
+    storage_scope_key(Collection, Key, undefined);
+query_scope_key(#kura_query{wheres = [{collection, Collection}, {key, Key}, {player_id, PlayerId}]}) ->
+    storage_scope_key(Collection, Key, PlayerId).
 
 game_economy_grant() ->
     St = install_api(),
@@ -642,7 +785,7 @@ probe_storage_set_inert() ->
     Code = "return game.storage.set('settings', 'theme', { value = 'dark' })",
     {ok, [false | _], _} = eval(Code, St),
     ?assertNot(meck:called(asobi_repo, insert, '_')),
-    ?assertNot(meck:called(asobi_repo, update_all, '_')).
+    ?assertNot(meck:called(asobi_repo, update, '_')).
 
 probe_storage_get_live() ->
     St = install_api_probe(),
