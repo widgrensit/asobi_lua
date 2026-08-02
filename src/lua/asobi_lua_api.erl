@@ -77,6 +77,7 @@ their value directly.
 """.
 
 -include_lib("kernel/include/logger.hrl").
+-include_lib("kura/include/kura.hrl").
 
 -export([install/2]).
 -export([deep_decode/1, decode_to_map/2]).
@@ -916,29 +917,44 @@ fun_terrain_preload(_) ->
 
 %% --- Storage helpers ---
 
+%% Global (PlayerId = undefined) and per-player rows are distinct
+%% namespaces - see asobi_storage:indexes/0's two partial unique indexes
+%% (`WHERE player_id IS NULL` / `WHERE player_id IS NOT NULL`). Every
+%% query and write below must carry that scope explicitly, or a global
+%% write can match and overwrite an unrelated player's row (or vice
+%% versa) (widgrensit/asobi#296 follow-up).
+
 -spec storage_get(binary(), binary(), binary() | undefined) ->
     {ok, term()} | {error, term()}.
 storage_get(Collection, Key, PlayerId) ->
-    Q0 = kura_query:from(asobi_storage),
-    Q1 = kura_query:where(Q0, {collection, Collection}),
-    Q2 = kura_query:where(Q1, {key, Key}),
-    Q3 = maybe_filter_player(Q2, PlayerId),
-    case asobi_repo:all(Q3) of
-        {ok, [Doc | _]} -> {ok, maps:get(value, Doc, #{})};
-        {ok, []} -> {error, not_found};
+    case storage_find(Collection, Key, PlayerId) of
+        {ok, Doc} -> {ok, maps:get(value, Doc, #{})};
         {error, _} = Err -> Err
     end.
 
 -spec storage_set(binary(), binary(), binary() | undefined, term()) ->
     {ok, term()} | {error, term()}.
 storage_set(Collection, Key, PlayerId, Value) ->
-    case storage_get(Collection, Key, PlayerId) of
-        {ok, _} ->
-            storage_update(Collection, Key, PlayerId, Value);
+    case storage_find(Collection, Key, PlayerId) of
+        {ok, Doc} ->
+            storage_update(Doc, Value);
         {error, not_found} ->
             storage_insert(Collection, Key, PlayerId, Value);
         {error, _} = Err ->
             Err
+    end.
+
+-spec storage_find(binary(), binary(), binary() | undefined) ->
+    {ok, map()} | {error, term()}.
+storage_find(Collection, Key, PlayerId) ->
+    Q0 = kura_query:from(asobi_storage),
+    Q1 = kura_query:where(Q0, {collection, Collection}),
+    Q2 = kura_query:where(Q1, {key, Key}),
+    Q3 = maybe_filter_player(Q2, PlayerId),
+    case asobi_repo:all(Q3) of
+        {ok, [Doc | _]} -> {ok, Doc};
+        {ok, []} -> {error, not_found};
+        {error, _} = Err -> Err
     end.
 
 storage_insert(Collection, Key, PlayerId, Value) ->
@@ -956,39 +972,27 @@ storage_insert(Collection, Key, PlayerId, Value) ->
     CS = kura_changeset:cast(
         asobi_storage, #{}, Params1, maps:keys(Params1)
     ),
-    asobi_repo:insert(CS).
+    normalize_repo_error(asobi_repo:insert(CS)).
 
-storage_update(Collection, Key, PlayerId, Value) ->
-    Q0 = kura_query:from(asobi_storage),
-    Q1 = kura_query:where(Q0, {collection, Collection}),
-    Q2 = kura_query:where(Q1, {key, Key}),
-    Q3 = maybe_filter_player(Q2, PlayerId),
-    Params = #{value => Value, updated_at => calendar:universal_time()},
-    CS = kura_changeset:cast(asobi_storage, #{}, Params, maps:keys(Params)),
-    case kura_changeset:apply_action(CS, update) of
-        {ok, Changes} ->
-            asobi_repo:update_all(Q3, dump_storage_changes(Changes));
-        {error, _} = Err ->
-            Err
-    end.
+%% Update-by-identity: Doc is the specific row storage_find/3 already
+%% scoped by player_id, so the changeset (and therefore the UPDATE ...
+%% WHERE id = $1 kura compiles) can only ever touch that one row -
+%% unlike the bulk update_all/2 this replaced, which had no player_id
+%% scope on the emitted SQL at all.
+storage_update(Doc, Value) ->
+    Version = maps:get(version, Doc, 1),
+    Params = #{value => Value, version => Version + 1, updated_at => calendar:universal_time()},
+    CS = kura_changeset:cast(asobi_storage, Doc, Params, maps:keys(Params)),
+    normalize_repo_error(asobi_repo:update(CS)).
 
-%% update_all/2 bypasses the schema, so its params never go through
-%% kura_types:dump/2 the way a changeset-backed insert/update does. Without
-%% this, a jsonb `value` map is handed to the driver raw and comes back
-%% `{error, badarg}` (widgrensit/asobi#296).
-dump_storage_changes(Changes) ->
-    Types = kura_schema:field_types(asobi_storage),
-    maps:map(
-        fun(Field, V) ->
-            case kura_types:dump(maps:get(Field, Types), V) of
-                {ok, Dumped} -> Dumped;
-                {error, _} -> V
-            end
-        end,
-        Changes
-    ).
+%% Repo write failures on an invalid/rejected changeset return the raw
+%% `#kura_changeset{}` record; collapse that to just its error list so
+%% `to_bin/1` doesn't dump internal changeset state (schema, params,
+%% types) into a Lua-visible error string.
+normalize_repo_error({error, #kura_changeset{errors = Errors}}) -> {error, Errors};
+normalize_repo_error(Result) -> Result.
 
-maybe_filter_player(Q, undefined) -> Q;
+maybe_filter_player(Q, undefined) -> kura_query:where(Q, {player_id, is_nil});
 maybe_filter_player(Q, PlayerId) -> kura_query:where(Q, {player_id, PlayerId}).
 
 %% --- Result encoding ---
