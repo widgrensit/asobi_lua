@@ -128,7 +128,9 @@ distance}`; `game.zone.{spawn,despawn}` and `game.terrain.{get_chunk,preload}`
 `rebar3 eunit` runs the `*_tests.erl` suites plus the `prop_*` PropEr suites
 (sandbox, error containment, state round-trip, input threading/robustness).
 `asobi_lua_SUITE` (CT) and storage-backed paths need the Docker Postgres from
-`docker compose up -d`. Lua fixtures live in `test/fixtures/lua/`. Always add
+`docker compose up -d`; `asobi_lua_storage_SUITE` runs `game.storage.*` against
+that database with no mocks (a mock is only as good as its assumption about the
+driver - see asobi#296). Lua fixtures live in `test/fixtures/lua/`. Always add
 or update tests alongside a bridge or `game.*` change.
 
 ## Git and PRs
