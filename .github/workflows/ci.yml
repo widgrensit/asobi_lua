@@ -27,6 +27,9 @@ jobs:
       otp-matrix: '["29.0.2"]'
       pre-test-command: 'rm -rf _build/test/lib/meck'
       enable-ct: true
+      # asobi_lua_storage_SUITE talks to a real Postgres - the mocked
+      # game.storage.* coverage is what let asobi#296 through.
+      extra-services-compose: 'docker-compose.yml'
       enable-audit: true
       enable-dependency-submission: true
       enable-summary: true
