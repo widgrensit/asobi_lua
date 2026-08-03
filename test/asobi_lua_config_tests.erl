@@ -76,7 +76,15 @@ config_test_() ->
             {"guest_auth truthy non-bool does not enable",
                 fun guest_auth_truthy_nonbool_stays_off/0},
             {"guest_auth resets a stale true when a later bundle omits it",
-                fun guest_auth_stale_true_is_reset/0}
+                fun guest_auth_stale_true_is_reset/0},
+            {"registration global sets the asobi registration mode",
+                fun registration_global_sets_mode/0},
+            {"registration global is read from config.lua in multi-mode",
+                fun registration_global_from_manifest/0},
+            {"registration absent leaves the operator's app env alone",
+                fun registration_absent_keeps_app_env/0},
+            {"registration with an unrecognised value keeps the configured mode",
+                fun registration_invalid_keeps_app_env/0}
         ]}.
 
 single_mode_loads_globals() ->
@@ -160,6 +168,56 @@ guest_auth_stale_true_is_reset() ->
     ok = asobi_lua_config:maybe_load_game_config(),
     ?assertEqual({ok, false}, application:get_env(asobi, guest_auth)),
     application:unset_env(asobi, guest_auth),
+    cleanup_temp_dir(TmpDir).
+
+registration_global_sets_mode() ->
+    application:unset_env(asobi, registration),
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(
+        filename:join(TmpDir, "match.lua"),
+        ~"match_size = 2\nregistration = \"closed\"\n"
+    ),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    ?assertEqual({ok, closed}, application:get_env(asobi, registration)),
+    application:unset_env(asobi, registration),
+    cleanup_temp_dir(TmpDir).
+
+registration_global_from_manifest() ->
+    application:unset_env(asobi, registration),
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(
+        filename:join(TmpDir, "config.lua"),
+        ~"registration = \"oauth_only\"\nreturn { solo = \"solo.lua\" }\n"
+    ),
+    ok = file:write_file(filename:join(TmpDir, "solo.lua"), ~"match_size = 2\n"),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    ?assertEqual({ok, oauth_only}, application:get_env(asobi, registration)),
+    application:unset_env(asobi, registration),
+    cleanup_temp_dir(TmpDir).
+
+registration_absent_keeps_app_env() ->
+    application:set_env(asobi, registration, closed),
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(filename:join(TmpDir, "match.lua"), ~"match_size = 2\n"),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    ?assertEqual({ok, closed}, application:get_env(asobi, registration)),
+    application:unset_env(asobi, registration),
+    cleanup_temp_dir(TmpDir).
+
+registration_invalid_keeps_app_env() ->
+    application:set_env(asobi, registration, closed),
+    TmpDir = make_temp_dir(),
+    ok = file:write_file(
+        filename:join(TmpDir, "match.lua"),
+        ~"match_size = 2\nregistration = \"invite_only\"\n"
+    ),
+    application:set_env(asobi, game_dir, TmpDir),
+    ok = asobi_lua_config:maybe_load_game_config(),
+    ?assertEqual({ok, closed}, application:get_env(asobi, registration)),
+    application:unset_env(asobi, registration),
     cleanup_temp_dir(TmpDir).
 
 single_mode_missing_size() ->

@@ -33,6 +33,7 @@ bots           = { script = "bots/ai.lua", min_players = 4 } -- optional; min_pl
 game_type      = "world"                    -- optional, "match" (default) or "world"
 state_strategy = "shared"                   -- optional, "shared" picks asobi_lua_match_shared (encode-once broadcast)
 guest_auth     = true                       -- optional, offer anonymous no-account play (needs an operator pepper; ADR 0004)
+registration   = "closed"                   -- optional, "open" (default) | "oauth_only" | "closed"
 
 -- World mode config (large session games, game_type = "world"):
 tick_rate               = 50              -- optional, ms per world tick (default 50 = 20 Hz)
@@ -53,9 +54,12 @@ Setting `game_type = "world"` routes the script through the `asobi_lua_world`
 bridge (zone_tick/2 + handle_input/3 returning entities). Defaults to "match",
 which uses the `asobi_lua_match` bridge (tick/1 + wrapped-state callbacks).
 
-`guest_auth` is read from `match.lua` in single-mode and from `config.lua` (the
-manifest) in multi-mode. It only *declares* intent; guest auth is on iff the
-operator also supplies a >= 32-byte pepper (ADR 0004).
+`guest_auth` and `registration` are read from `match.lua` in single-mode and
+from `config.lua` (the manifest) in multi-mode. `guest_auth` only *declares*
+intent; guest auth is on iff the operator also supplies a >= 32-byte pepper
+(ADR 0004). `registration` sets the signup posture read by
+`asobi_registration:mode/0`; omitting it leaves whatever the release's
+`sys.config` (or asobi's `open` default) already put in the app env.
 
 Bot scripts can export a `names` list that the platform reads after loading:
 
@@ -67,7 +71,12 @@ names = {"Spark", "Blitz", "Volt"}
 -include_lib("kernel/include/logger.hrl").
 -include("asobi_lua_bots.hrl").
 
--export([maybe_load_game_config/0, reload_game_modes/0, apply_guest_auth/1]).
+-export([
+    maybe_load_game_config/0,
+    reload_game_modes/0,
+    apply_guest_auth/1,
+    apply_registration_mode/1
+]).
 -ifdef(TEST).
 -export([safe_join/2]).
 -endif.
@@ -76,12 +85,14 @@ names = {"Spark", "Blitz", "Volt"}
 maybe_load_game_config() ->
     GameDirStr = to_string(application:get_env(asobi, game_dir, ~"/app/game")),
     _ = apply_guest_auth(GameDirStr),
+    _ = apply_registration_mode(GameDirStr),
     reload_game_modes().
 
 %% Refresh only the game_modes registry from the mode scripts, WITHOUT
-%% re-deriving guest_auth. The config watcher (asobi#232) calls this on a live
-%% mode-shape edit, so guest-auth posture (ADR 0004's two-key AND) stays a
-%% boot-only decision that a bundle write cannot flip at runtime.
+%% re-deriving guest_auth or registration mode. The config watcher (asobi#232)
+%% calls this on a live mode-shape edit, so auth posture (ADR 0004's two-key
+%% AND, and the signup gate) stays a boot-only decision that a bundle write
+%% cannot flip at runtime.
 -spec reload_game_modes() -> ok | {error, term()}.
 reload_game_modes() ->
     GameDirStr = to_string(application:get_env(asobi, game_dir, ~"/app/game")),
@@ -104,6 +115,59 @@ reload_game_modes() ->
 %% Shared with asobi_engine's bundle loader so managed cloud behaves the same.
 -spec apply_guest_auth(string() | binary()) -> ok.
 apply_guest_auth(GameDir) ->
+    Declared =
+        case config_script_state(GameDir) of
+            {ok, St} -> read_global_bool(~"guest_auth", St) =:= true;
+            error -> false
+        end,
+    application:set_env(asobi, guest_auth, Declared).
+
+%% Registration posture (asobi ADR 0002) used to be reachable only through the
+%% release's sys.config, which no engine-hosted game can edit - every hosted
+%% game silently ran the `open` default (#122). The game declares it as
+%% `registration = "open" | "oauth_only" | "closed"` in the same config script
+%% guest_auth uses. Omitting the global leaves the app env untouched so a
+%% self-hoster's sys.config still wins; an unrecognised value is logged and
+%% ignored rather than silently downgrading the posture to `open`.
+%% Shared with asobi_engine's bundle loader so managed cloud behaves the same.
+-spec apply_registration_mode(string() | binary()) -> ok.
+apply_registration_mode(GameDir) ->
+    case config_script_state(GameDir) of
+        {ok, St} -> set_registration_mode(read_registration(St));
+        error -> ok
+    end.
+
+-spec set_registration_mode(undefined | {ok, atom()} | {invalid, term()}) -> ok.
+set_registration_mode(undefined) ->
+    ok;
+set_registration_mode({ok, Mode}) ->
+    application:set_env(asobi, registration, Mode);
+set_registration_mode({invalid, Value}) ->
+    ?LOG_ERROR(#{
+        msg => ~"invalid registration global, keeping the configured mode",
+        value => describe(Value),
+        expected => [~"open", ~"oauth_only", ~"closed"]
+    }).
+
+-spec describe(term()) -> binary().
+describe(V) when is_binary(V) -> V;
+describe(V) -> iolist_to_binary(io_lib:format("~p", [V])).
+
+-spec read_registration(dynamic()) -> undefined | {ok, atom()} | {invalid, term()}.
+read_registration(St) ->
+    case luerl:get_table_keys([~"registration"], St) of
+        {ok, nil, _} -> undefined;
+        {ok, ~"open", _} -> {ok, open};
+        {ok, ~"oauth_only", _} -> {ok, oauth_only};
+        {ok, ~"closed", _} -> {ok, closed};
+        {ok, Other, _} -> {invalid, Other};
+        _ -> undefined
+    end.
+
+%% Evaluate the game's config script (config.lua when present, else match.lua)
+%% in a sandboxed Luerl state so the deployment-wide globals can be read off it.
+-spec config_script_state(string() | binary()) -> {ok, dynamic()} | error.
+config_script_state(GameDir) ->
     GameDirStr = to_string(GameDir),
     ConfigPath = filename:join(GameDirStr, "config.lua"),
     MatchPath = filename:join(GameDirStr, "match.lua"),
@@ -112,18 +176,16 @@ apply_guest_auth(GameDir) ->
             true -> ConfigPath;
             false -> MatchPath
         end,
-    Declared =
-        case filelib:is_regular(Script) of
-            false ->
-                false;
-            true ->
-                St0 = asobi_lua_loader:init_sandboxed(),
-                case do_file(Script, St0) of
-                    {ok, _Results, St1} -> read_global_bool(~"guest_auth", St1) =:= true;
-                    {error, _} -> false
-                end
-        end,
-    application:set_env(asobi, guest_auth, Declared).
+    case filelib:is_regular(Script) of
+        false ->
+            error;
+        true ->
+            St0 = asobi_lua_loader:init_sandboxed(),
+            case do_file(Script, St0) of
+                {ok, _Results, St1} -> {ok, St1};
+                {error, _} -> error
+            end
+    end.
 
 %% --- Multi-mode: config.lua maps mode names to script paths ---
 
