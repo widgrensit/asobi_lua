@@ -19,6 +19,8 @@ game.log(level, message, meta)                   -- with a metadata table
 
 -- Messaging
 game.broadcast(event, payload)                   -- broadcast to all match players
+                                                 -- event: 1-64 chars of [A-Za-z0-9_-],
+                                                 -- and not an asobi-reserved name
 game.send(player_id, message)                    -- send to specific player
 
 -- Economy
@@ -73,7 +75,11 @@ The persistence-style calls (`economy.*`, `storage.*`, `leaderboard.top/rank/aro
 success, `{ error = "reason" }` on failure (`ok_result/2` / `error_result/2` via
 `wrap_result/2`). Read `result.ok`. The plain calls (`broadcast`, `send`,
 `chat.send`, `zone.spawn`/`despawn`, `leaderboard.submit`, `spatial.*`) return
-their value directly.
+their value directly. `broadcast` is the exception on the failure side: an
+event name asobi would reject at the socket boundary (empty, over 64 bytes,
+outside `[A-Za-z0-9_-]`, or one of asobi's own reserved wire event names such
+as `state`/`tick`/`finished`) returns `{ error = "reason" }` rather than
+being silently dropped downstream.
 """.
 
 -include_lib("kernel/include/logger.hrl").
@@ -321,21 +327,86 @@ log_dropped(Ctx) ->
         _:_ -> ok
     end.
 
+%% Mirrors the event-name rules asobi enforces at the socket boundary
+%% (`event_name_binary/1` and `?RESERVED_EVENT_NAMES` in `asobi_ws_handler`,
+%% widgrensit/asobi#303). Kept here as well so a rejected name surfaces to
+%% the script at the `game.broadcast` call site instead of only in asobi's
+%% server-side log - both lists must move together.
+-define(MAX_EVENT_NAME_BYTES, 64).
+-define(RESERVED_EVENT_NAMES, [
+    ~"state",
+    ~"tick",
+    ~"terrain",
+    ~"list",
+    ~"left",
+    ~"joined",
+    ~"finished",
+    ~"phase_changed",
+    ~"matched",
+    ~"matchmaker_failed",
+    ~"matchmaker_expired",
+    ~"vote_start",
+    ~"vote_tally",
+    ~"vote_result",
+    ~"vote_vetoed"
+]).
+
 fun_broadcast(#{match_pid := MatchPid}) ->
     fun(Args, St) ->
         case decode_args(Args, St) of
             [Event, Payload] when is_binary(Event) ->
-                asobi_match_server:broadcast_event(MatchPid, Event, to_map(Payload)),
-                {[true], St};
+                do_broadcast(MatchPid, Event, to_map(Payload), St);
             [Event] when is_binary(Event) ->
-                asobi_match_server:broadcast_event(MatchPid, Event, #{}),
-                {[true], St};
+                do_broadcast(MatchPid, Event, #{}, St);
             _ ->
                 error_result(~"broadcast requires (event, payload)", St)
         end
     end;
 fun_broadcast(_) ->
     fun(_, St) -> error_result(~"broadcast not available (no match context)", St) end.
+
+do_broadcast(MatchPid, Event, Payload, St) ->
+    case event_name_error(Event) of
+        ok ->
+            asobi_match_server:broadcast_event(MatchPid, Event, Payload),
+            {[true], St};
+        {error, Reason} ->
+            error_result(Reason, St)
+    end.
+
+-spec event_name_error(binary()) -> ok | {error, binary()}.
+event_name_error(Event) ->
+    case lists:member(Event, ?RESERVED_EVENT_NAMES) of
+        true ->
+            {error,
+                iolist_to_binary([
+                    ~"broadcast event name \"",
+                    Event,
+                    ~"\" is reserved by asobi (",
+                    lists:join(~", ", ?RESERVED_EVENT_NAMES),
+                    ~")"
+                ])};
+        false ->
+            case valid_event_name(Event) of
+                true ->
+                    ok;
+                false ->
+                    {error, ~"broadcast event name must be 1-64 chars of [A-Za-z0-9_-]"}
+            end
+    end.
+
+valid_event_name(Event) ->
+    byte_size(Event) > 0 andalso
+        byte_size(Event) =< ?MAX_EVENT_NAME_BYTES andalso
+        lists:all(fun is_event_name_char/1, binary_to_list(Event)).
+
+%% Deliberately excludes `.` - a script must not mint a deeper `world.foo.bar`
+%% sub-namespace.
+is_event_name_char(C) when C >= $a, C =< $z -> true;
+is_event_name_char(C) when C >= $A, C =< $Z -> true;
+is_event_name_char(C) when C >= $0, C =< $9 -> true;
+is_event_name_char(C) when C =:= $_; C =:= $- -> true;
+is_event_name_char(_) -> false.
 
 fun_send() ->
     fun(Args, St) ->
