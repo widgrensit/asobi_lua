@@ -55,7 +55,6 @@
         %% pepper (a secret) is operator-injected.
         {guest_verifier_pepper, <<"${ASOBI_GUEST_VERIFIER_PEPPER}">>}
     ]},
-    {asobi_lua, []},
     {shigoto, [
         {pool, asobi_repo},
         {poll_interval, 200},

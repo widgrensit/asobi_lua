@@ -1,5 +1,11 @@
 # Security Policy
 
+> `asobi_lua` is retired and holds no source. Report vulnerabilities in the Lua
+> runtime, the `game.*` API, the sandbox or bots against
+> [widgrensit/asobi](https://github.com/widgrensit/asobi/security/advisories/new).
+> Only issues in this repository's packaging (Dockerfile, release config) belong
+> here.
+
 ## Reporting a vulnerability
 
 If you discover a security vulnerability in `asobi_lua`, please report it

@@ -1,0 +1,14 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a bug or request a feature (widgrensit/asobi)
+    url: https://github.com/widgrensit/asobi/issues/new/choose
+    about: >-
+      asobi_lua is retired. The Lua runtime, the game.* API, bots, hot-reload and
+      the sandbox now live in widgrensit/asobi - file everything there. Existing
+      issues here stay open and readable.
+  - name: Ask a question (Discord)
+    url: https://discord.gg/vYSfYYyXpu
+    about: Lua scripting help, self-hosting questions and general chat.
+  - name: Report a security vulnerability
+    url: https://github.com/widgrensit/asobi/security/advisories/new
+    about: Report privately through asobi's security advisories. Never in a public issue.

@@ -1,21 +1,21 @@
 name: Docker publish
 
+# Publishes ghcr.io/widgrensit/asobi_lua, which is now an alias for a release
+# built entirely out of the asobi dependency (widgrensit/asobi#339). The image
+# name, tags, entrypoint and env stay exactly as they were so nobody's existing
+# `docker pull` or `docker run` breaks.
+#
 # Staleness gate (widgrensit/asobi_lua#103): the locked `asobi` ref in
-# rebar.lock can lag an already-fixed-upstream asobi release for up to a
-# week, because bump-asobi-pin only runs on a schedule. This workflow fails
-# loudly if the locked ref is behind the latest asobi release rather than
-# silently publishing a stale image.
+# rebar.lock is what the alias actually ships. The nightly pin bump that used to
+# move it is retired, so the pin only moves when someone bumps the tag in
+# rebar.config by hand. This gate fails loudly when that has not happened and
+# the pin is behind the latest asobi release, rather than silently republishing
+# a stale image.
 #
 # Deliberately fail-open on GitHub API/infrastructure hiccups (rate limit,
 # transient 5xx, timeout, no release yet, malformed response) and fail-closed
 # only on a definite "ahead"/"diverged" comparison - a stale pin should block
 # a publish, a flaky API call should not.
-#
-# Follow-up out of scope for this repo: #103 also proposes a
-# repository_dispatch from asobi's own release workflow to trigger
-# bump-asobi-pin.yml immediately on every asobi release (the fastest fix).
-# That requires adding a dispatch step to widgrensit/asobi's CI, which is a
-# change to a different repo - tracked as widgrensit/asobi#276.
 
 on:
   push:
@@ -82,7 +82,7 @@ jobs:
               echo "locked ref already contains commits not yet in a tagged release; not stale."
               ;;
             ahead|diverged)
-              echo "::error::asobi pin is stale - rebar.lock pins ${locked_ref}, but the latest asobi release ${latest_tag} (${latest_sha}) is '${status}' relative to it. Run the bump-asobi-pin workflow (or 'rebar3 upgrade asobi'), merge the pin bump, and re-run this publish."
+              echo "::error::asobi pin is stale - rebar.lock pins ${locked_ref}, but the latest asobi release ${latest_tag} (${latest_sha}) is '${status}' relative to it. Set the asobi tag in rebar.config to ${latest_tag}, run 'rebar3 upgrade asobi', merge the pin bump, and re-run this publish."
               exit 1
               ;;
             *)

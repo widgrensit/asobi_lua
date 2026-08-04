@@ -47,7 +47,6 @@
     {asobi, [
         {game_dir, "/app/game"}
     ]},
-    {asobi_lua, []},
     {shigoto, [
         {pool, asobi_repo},
         {poll_interval, 200},

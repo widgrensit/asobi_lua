@@ -1,5 +1,16 @@
 # AGENTS.md
 
+> **This repository is retired.** The Lua runtime was merged into
+> [widgrensit/asobi](https://github.com/widgrensit/asobi) (asobi#339) and is
+> developed there. No Erlang source lives here any more. All that remains is the
+> packaging that keeps `ghcr.io/widgrensit/asobi_lua` publishing as an alias for
+> an asobi-only release, so existing self-hosters are not broken.
+>
+> **Do not add code here.** Lua bridge, `game.*` API, bots, hot-reload, sandbox
+> and script validation all belong in `asobi/src/lua/`. The working agreement
+> below is kept because it still describes the scope rules that now apply inside
+> asobi, and because the reasoning is referenced from ADRs.
+
 Working agreement for agents and contributors on **asobi_lua** - the Lua
 scripting runtime for the [asobi](https://github.com/widgrensit/asobi) game
 backend. A thin OTP layer that embeds Luerl (Lua 5.3 on the BEAM) and exposes
@@ -36,28 +47,20 @@ files, hot-reloaded in place with no restart. Apache-2.0, pre-1.0.
 
 ## Commands
 
+Only packaging is left, so only packaging commands apply. The lint, typecheck
+and test commands moved to `asobi` along with the source.
+
 ```bash
-rebar3 compile
-rebar3 eunit                 # unit + proper property suites
-docker compose up -d         # Postgres 17 for storage-backed tests
-rebar3 ct                    # asobi_lua_SUITE
-rebar3 fmt                   # erlfmt (write); CI runs fmt --check
-rebar3 xref
-rebar3 dialyzer
-rebar3 ex_doc                # fix every warning before push
-rebar3 shell                 # dev_sys.config
+rebar3 as prod release       # the alias release the Docker image ships
+rebar3 fmt --check           # rebar.config only
+docker build .               # what docker-publish.yml publishes
 ```
 
-Migrations are never hand-written; the storage schema comes from `asobi`. Use
-`rebar3 kura compile` if a migration is ever needed here.
-
-## Pre-push checklist (all green)
-
-`rebar3 fmt` -> `rebar3 xref` -> `rebar3 dialyzer` -> `rebar3 eunit` ->
-`rebar3 ct` -> `rebar3 ex_doc` -> `rebar3 fmt --check`.
-
-CI additionally runs dependency audit; eqwalize/lint/mutate not wired here
-(eqwalize panics on OTP 29) - add if that changes.
+Refreshing which asobi the alias ships: set the `{tag, "vX.Y.Z"}` in
+`rebar.config` to the latest asobi release, `rebar3 upgrade asobi`, PR the
+`rebar.lock` change. There is no automatic pin bump - the nightly one was
+retired with the merge, because it would have pinned an asobi that redefines
+every module this repo used to own.
 
 ## Conventions
 
