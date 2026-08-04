@@ -1,39 +1,58 @@
 name: CI
 
+# asobi_lua holds no Erlang source any more - widgrensit/asobi#339 merged the Lua
+# runtime into asobi, so lint, typecheck and the unit/CT suites all run there.
+# The Taure/erlang-ci delegation is gone with the source it analysed. What still
+# has to hold is that the alias release assembles and the image builds: if this
+# goes red, ghcr.io/widgrensit/asobi_lua cannot be rebuilt.
+
 on:
   push:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**', 'LICENSE']
+    paths-ignore: ['**.md', 'docs/**', 'guides/**', 'LICENSE']
   pull_request:
     branches: [main]
-    paths-ignore: ['**.md', 'docs/**', 'LICENSE']
+    paths-ignore: ['**.md', 'docs/**', 'guides/**', 'LICENSE']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 jobs:
-  ci:
-    uses: Taure/erlang-ci/.github/workflows/ci.yml@v2.1.4
-    permissions:
-      contents: write
-      pull-requests: write
-    with:
-      version-file: '.tool-versions'
-      # version-file drives analysis jobs; the eunit/ct matrix needs otp-matrix
-      # (else it falls back to the otp-version default of 28). And meck is a
-      # test-only dep absent from rebar.lock, so a stale OTP-28-era meck is
-      # restored from cache and fails on OTP 29 - drop it so it re-resolves.
-      otp-matrix: '["29.0.2"]'
-      pre-test-command: 'rm -rf _build/test/lib/meck'
-      enable-ct: true
-      # asobi_lua_storage_SUITE talks to a real Postgres - the mocked
-      # game.storage.* coverage is what let asobi#296 through.
-      extra-services-compose: 'docker-compose.yml'
-      enable-audit: true
-      enable-dependency-submission: true
-      enable-summary: true
-    secrets: inherit
+  release:
+    name: Alias release builds
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: erlef/setup-beam@v1
+        with:
+          version-file: '.tool-versions'
+          version-type: strict
+
+      - name: Build the prod release
+        run: rebar3 as prod release
+
+      # The reason this repo stopped shipping its own source. Before the merge,
+      # asobi_lua and asobi each defined asobi_bot, asobi_lua_match and 14 other
+      # modules; a release carrying both would load whichever copy the code path
+      # reached first.
+      - name: Assert no duplicate Lua modules in the release
+        run: |
+          set -euo pipefail
+          dupes=$(find _build/prod/rel/asobi_lua/lib \
+            \( -name 'asobi_lua_*.beam' -o -name 'asobi_bot*.beam' \) -printf '%f\n' \
+            | sort | uniq -d)
+          if [ -n "$dupes" ]; then
+            echo "::error::the release ships duplicate modules:"
+            echo "$dupes"
+            exit 1
+          fi
+          echo "no duplicate Lua modules in the release."
 
   docker-build:
     runs-on: ubuntu-latest

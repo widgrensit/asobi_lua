@@ -14,10 +14,9 @@ RUN curl -fsSL https://github.com/erlang/rebar3/releases/download/3.27.0/rebar3 
 COPY rebar.config rebar.lock ./
 RUN rebar3 compile --deps_only
 
-# Copy source and build release
+# Build the release. There is no local src/ - asobi_lua is an alias image whose
+# only application is the asobi dependency (widgrensit/asobi#339).
 COPY config/ config/
-COPY include/ include/
-COPY src/ src/
 RUN rebar3 as prod release
 
 # --- Runtime ---

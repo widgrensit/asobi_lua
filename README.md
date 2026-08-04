@@ -1,3 +1,38 @@
+# This repository is retired
+
+**The Lua runtime now lives in [widgrensit/asobi](https://github.com/widgrensit/asobi).**
+Everything that used to be here - the `game.*` API, hot-reload, the sandbox, bots,
+script validation, the Lua match and world bridges - moved into `asobi` itself and
+is developed there. This repository holds no Erlang source any more.
+
+**Your Lua game code is unaffected.** `match.lua`, `world.lua`, `config.lua` and
+the `game.*` API are unchanged. Nothing to rewrite, nothing to rename.
+
+**Your Docker image is unaffected.** `ghcr.io/widgrensit/asobi_lua` keeps being
+published from this repository, with the same tags, the same `bin/asobi_lua`
+entrypoint, the same port and the same environment variables. It is now an alias:
+the release it ships is built from `asobi`, which carries the Lua runtime. Nothing
+to change in your compose file or deployment.
+
+New self-hosters should follow
+[asobi's self-hosting guide](https://github.com/widgrensit/asobi/blob/main/guides/self-hosting.md).
+
+**Where to go:**
+
+| For | Go to |
+| --- | --- |
+| Bugs and feature requests | [widgrensit/asobi issues](https://github.com/widgrensit/asobi/issues) |
+| Security reports | [asobi security advisories](https://github.com/widgrensit/asobi/security/advisories/new) (never a public issue) |
+| Lua scripting docs | [asobi guides](https://github.com/widgrensit/asobi/tree/main/guides) and [asobi.dev/docs](https://asobi.dev/docs) |
+| Questions | [Discord](https://discord.gg/vYSfYYyXpu) |
+
+This tracker is closed to new issues. Existing issues stay open and readable -
+they are the record behind a lot of these decisions.
+
+The rest of this README is kept for reference and describes the pre-merge layout.
+
+---
+
 <p align="center">
   <img alt="asobi" src="https://raw.githubusercontent.com/widgrensit/asobi/main/docs/logo.png" height="96">
 </p>
@@ -19,7 +54,7 @@
   <a href="https://asobi.dev/docs">Docs</a> •
   <a href="https://asobi.dev/demo">Live demo</a> •
   <a href="https://discord.gg/vYSfYYyXpu">Discord</a> •
-  <a href="https://github.com/widgrensit/asobi_lua/issues">Issues</a>
+  <a href="https://github.com/widgrensit/asobi/issues">Issues</a>
 </p>
 
 <p align="center">
