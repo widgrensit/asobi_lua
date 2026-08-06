@@ -69,5 +69,9 @@ ENV ASOBI_DB_SOCKET_OPTS=inet
 # expose distribution.
 ENV ERLANG_COOKIE=asobi_lua
 
-ENTRYPOINT ["tini", "--"]
+COPY --chown=asobi:asobi entrypoint.sh /app/entrypoint.sh
+
+# tini stays PID 1; the notice runs in front of the node and execs it, so
+# signals and exit codes are unchanged.
+ENTRYPOINT ["tini", "--", "/app/entrypoint.sh"]
 CMD ["bin/asobi_lua", "foreground"]
