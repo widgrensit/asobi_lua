@@ -4,6 +4,22 @@
 
 <h1 align="center">asobi_lua</h1>
 
+> [!IMPORTANT]
+> **This repository is archived. The Lua runtime lives in
+> [`widgrensit/asobi`](https://github.com/widgrensit/asobi).**
+>
+> Everything here was merged into asobi - the `game.*` Lua API, the loader,
+> hot reload, bots, the config watcher. A single dependency now gets you the
+> game backend and the Lua runtime together, and the operator console with it.
+>
+> ```erlang
+> {deps, [{asobi, "~> 0.1"}]}.
+> ```
+>
+> Nothing is lost and nothing needs porting: the module names are unchanged.
+> Drop `asobi_lua` from your deps and add `asobi`.
+
+
 <p align="center">
   <b>Open-source game backend. Write it in Lua. Hot-reload without restart. Apache-2.</b>
 </p>
