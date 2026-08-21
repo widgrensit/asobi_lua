@@ -4,7 +4,8 @@ name: CI
 # runtime into asobi, so lint, typecheck and the unit/CT suites all run there.
 # The Taure/erlang-ci delegation is gone with the source it analysed. What still
 # has to hold is that the alias release assembles and the image builds: if this
-# goes red, ghcr.io/widgrensit/asobi_lua cannot be rebuilt.
+# goes red, nothing is affected: this repository is archived and its image is
+# no longer built. Kept only so the final state stays reproducible.
 
 on:
   push:

@@ -2,9 +2,13 @@
 
 > **This repository is retired.** The Lua runtime was merged into
 > [widgrensit/asobi](https://github.com/widgrensit/asobi) (asobi#339) and is
-> developed there. No Erlang source lives here any more. All that remains is the
-> packaging that keeps `ghcr.io/widgrensit/asobi_lua` publishing as an alias for
-> an asobi-only release, so existing self-hosters are not broken.
+> developed there. No Erlang source lives here any more, and the repository is
+> ARCHIVED and read-only.
+>
+> `ghcr.io/widgrensit/asobi_lua` is **no longer built or published**. It was
+> renamed to `ghcr.io/widgrensit/asobi`. Tags already published keep working but
+> receive no fixes; the last was built from asobi v0.71.0. Do not describe the
+> old name as a live alias anywhere - it was, briefly, and it is not now.
 >
 > **Do not add code here.** Lua bridge, `game.*` API, bots, hot-reload, sandbox
 > and script validation all belong in `asobi/src/lua/`. The working agreement
@@ -22,7 +26,7 @@ files, hot-reloaded in place with no restart. Apache-2.0, pre-1.0.
 - **asobi** (public library, Hex) - the game backend itself: auth, matches,
   matchmaker, leaderboards, economy, social, worlds, storage. Erlang authors
   depend on this directly.
-- **asobi_lua** (this repo, public, `ghcr.io/widgrensit/asobi_lua`) - wraps
+- **asobi_lua** (this repo, ARCHIVED; its image was renamed to `ghcr.io/widgrensit/asobi`) - wrapped
   the public `asobi` library with a Lua `game.*` API via Luerl. Depends on
   `asobi` + `luerl`. Lua integration code belongs **here**, never in `asobi`.
 - **asobi_engine** (private) - single-tenant hosted image; depends on BOTH
